@@ -1,0 +1,122 @@
+#pragma once
+
+#include <string_view>
+
+namespace nus {
+
+enum class TokenKind {
+    Invalid,
+    EndOfFile,
+
+    Identifier,
+    IntegerLiteral,
+    FloatLiteral,
+    StringLiteral,
+    CharLiteral,
+    ByteLiteral,
+    ByteStringLiteral,
+    RawStringLiteral,
+
+    KwAs,
+    KwAsync,
+    KwAwait,
+    KwBreak,
+    KwConst,
+    KwContinue,
+    KwDefer,
+    KwElse,
+    KwEnum,
+    KwExtern,
+    KwFalse,
+    KwFn,
+    KwFor,
+    KwIf,
+    KwImpl,
+    KwIn,
+    KwLet,
+    KwLoop,
+    KwMatch,
+    KwMut,
+    KwPub,
+    KwReturn,
+    KwScope,
+    KwSpawn,
+    KwStruct,
+    KwTrait,
+    KwTrue,
+    KwUnsafe,
+    KwUse,
+    KwWhile,
+
+    // Reserved for future language features.
+    KwNetwork,
+    KwService,
+    KwProtocol,
+    KwSimulate,
+    KwNode,
+    KwLink,
+    KwWhere,
+    KwType,
+    KwMove,
+    KwRef,
+    KwStatic,
+
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    LeftBracket,
+    RightBracket,
+
+    Comma,
+    Semicolon,
+    Colon,
+    ColonColon,
+    Dot,
+    DotDot,
+    DotDotEqual,
+    At,
+    Question,
+
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+
+    Equal,
+    EqualEqual,
+    Bang,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+
+    Ampersand,
+    AmpersandAmpersand,
+    Pipe,
+    PipePipe,
+    Caret,
+    Tilde,
+    ShiftLeft,
+    ShiftRight,
+
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
+    PercentEqual,
+    AmpersandEqual,
+    PipeEqual,
+    CaretEqual,
+    ShiftLeftEqual,
+    ShiftRightEqual,
+
+    Arrow,
+    FatArrow,
+};
+
+[[nodiscard]] std::string_view tokenKindName(TokenKind kind) noexcept;
+
+} // namespace nus
