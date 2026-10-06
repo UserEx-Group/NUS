@@ -1220,7 +1220,7 @@ Mensagens de erro são parte da experiência da linguagem.
 
 ---
 
-# 51. Compiler UX
+# 51. Compiler NUS
 
 Erros devem ser semelhantes a:
 

@@ -107,7 +107,7 @@ compiler/
 Enquanto a linguagem não possuir nome definitivo:
 
 ```text
-.ux
+.nus
 ```
 
 será usada provisoriamente.
@@ -115,9 +115,9 @@ será usada provisoriamente.
 Exemplo:
 
 ```text
-main.ux
-network.ux
-packet.ux
+main.nus
+network.nus
+packet.nus
 ```
 
 ---
@@ -1483,10 +1483,10 @@ Exemplo:
 
 ```text
 src/
-├── main.ux
-├── packet.ux
+├── main.nus
+├── packet.nus
 └── network/
-    └── tcp.ux
+    └── tcp.nus
 ```
 
 Import:
@@ -1786,7 +1786,7 @@ Exemplo:
 ```text
 error[E0214]: use of moved value `packet`
 
-  src/main.ux:18:10
+  src/main.nus:18:10
 
 14 | send(packet);
    |      ------ value moved here
