@@ -2,6 +2,7 @@
 #include "nus/lexer/Lexer.hpp"
 #include "nus/lexer/TokenKind.hpp"
 #include "nus/parser/Parser.hpp"
+#include "nus/sema/SemanticAnalyzer.hpp"
 #include "nus/source/SourceManager.hpp"
 
 #include <exception>
@@ -21,12 +22,14 @@ void printDiagnostic(const nus::SourceManager& sources, const nus::Diagnostic& d
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "usage: nusc <file.nus> [--tokens]\n";
+        std::cerr << "usage: nusc <file.nus> [--tokens|--check]\n";
         return 2;
     }
 
-    const bool tokens_only = argc == 3 && std::string_view(argv[2]) == "--tokens";
-    if (argc == 3 && !tokens_only) {
+    const std::string_view option = argc == 3 ? std::string_view(argv[2]) : std::string_view{};
+    const bool tokens_only = option == "--tokens";
+    const bool check_only = option == "--check";
+    if (argc == 3 && !tokens_only && !check_only) {
         std::cerr << "nusc: unknown option `" << argv[2] << "`\n";
         return 2;
     }
@@ -57,6 +60,15 @@ int main(int argc, char** argv) {
             printDiagnostic(sources, diagnostic);
         }
         if (parser.hasErrors()) return 1;
+
+        nus::sema::SemanticAnalyzer analyzer;
+        analyzer.analyze(ast);
+        for (const auto& diagnostic : analyzer.diagnostics()) {
+            printDiagnostic(sources, diagnostic);
+        }
+        if (analyzer.hasErrors()) return 1;
+
+        if (check_only) return 0;
 
         nus::ast::AstPrinter printer;
         std::cout << printer.print(ast);
