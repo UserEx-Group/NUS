@@ -62,7 +62,7 @@ void Parser::errorAt(const Token& token, std::string message) {
 
 void Parser::synchronizeTopLevel() {
     while (!isAtEnd()) {
-        if (check(TokenKind::KwFn)) return;
+        if (check(TokenKind::KwFn) || check(TokenKind::KwStruct) || check(TokenKind::KwImpl)) return;
         advance();
     }
 }
@@ -96,23 +96,30 @@ ast::SourceFile Parser::parseSourceFile() {
     }
 
     while (!isAtEnd()) {
-        if (!check(TokenKind::KwFn)) {
-            errorAt(current(), "expected top-level declaration; milestone 3 currently supports `fn`");
-            synchronizeTopLevel();
+        if (check(TokenKind::KwFn)) {
+            if (auto function = parseFunction()) file.functions.push_back(std::move(*function));
+            else synchronizeTopLevel();
+            continue;
+        }
+        if (check(TokenKind::KwStruct)) {
+            if (auto structure = parseStruct()) file.structs.push_back(std::move(*structure));
+            else synchronizeTopLevel();
+            continue;
+        }
+        if (check(TokenKind::KwImpl)) {
+            if (auto implementation = parseImpl()) file.impls.push_back(std::move(*implementation));
+            else synchronizeTopLevel();
             continue;
         }
 
-        if (auto function = parseFunction()) {
-            file.functions.push_back(std::move(*function));
-        } else {
-            synchronizeTopLevel();
-        }
+        errorAt(current(), "expected top-level declaration (`fn`, `struct`, or `impl`)");
+        synchronizeTopLevel();
     }
 
     return file;
 }
 
-std::optional<ast::FunctionDecl> Parser::parseFunction() {
+std::optional<ast::FunctionDecl> Parser::parseFunction(bool allow_receiver) {
     const auto start = expect(TokenKind::KwFn, "expected `fn`").span;
     const auto& name = expect(TokenKind::Identifier, "expected function name");
     expect(TokenKind::LeftParen, "expected `(` after function name");
@@ -121,16 +128,25 @@ std::optional<ast::FunctionDecl> Parser::parseFunction() {
     function.name = tokenText(name);
 
     if (!check(TokenKind::RightParen)) {
-        do {
-            function.parameters.push_back(parseParameter());
-        } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+        bool parsed_receiver = false;
+        if (allow_receiver) parsed_receiver = parseReceiver(function);
+
+        if (parsed_receiver) {
+            if (match(TokenKind::Comma) && !check(TokenKind::RightParen)) {
+                do {
+                    function.parameters.push_back(parseParameter());
+                } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+            }
+        } else {
+            do {
+                function.parameters.push_back(parseParameter());
+            } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+        }
     }
 
     expect(TokenKind::RightParen, "expected `)` after parameters");
 
-    if (match(TokenKind::Arrow)) {
-        function.return_type = parseType();
-    }
+    if (match(TokenKind::Arrow)) function.return_type = parseType();
 
     if (!check(TokenKind::LeftBrace)) {
         errorAt(current(), "expected function body");
@@ -140,6 +156,79 @@ std::optional<ast::FunctionDecl> Parser::parseFunction() {
     function.body = parseBlock();
     function.span = spanFrom(start, function.body->span);
     return function;
+}
+
+bool Parser::parseReceiver(ast::FunctionDecl& function) {
+    if (check(TokenKind::Identifier) && tokenText(current()) == "self") {
+        const auto token = advance();
+        function.receiver = ast::ReceiverKind::Value;
+        function.receiver_span = token.span;
+        return true;
+    }
+
+    if (!check(TokenKind::Ampersand)) return false;
+    const auto start = advance().span;
+    const bool is_mutable = match(TokenKind::KwMut);
+    if (!check(TokenKind::Identifier) || tokenText(current()) != "self") {
+        errorAt(current(), "expected `self` after receiver reference");
+        return true;
+    }
+    const auto self_token = advance();
+    function.receiver = is_mutable ? ast::ReceiverKind::MutableReference : ast::ReceiverKind::Reference;
+    function.receiver_span = spanFrom(start, self_token.span);
+    return true;
+}
+
+std::optional<ast::StructDecl> Parser::parseStruct() {
+    const auto start = expect(TokenKind::KwStruct, "expected `struct`").span;
+    const auto& name = expect(TokenKind::Identifier, "expected struct name");
+    expect(TokenKind::LeftBrace, "expected `{` after struct name");
+
+    ast::StructDecl declaration;
+    declaration.name = tokenText(name);
+
+    while (!check(TokenKind::RightBrace) && !isAtEnd()) {
+        const auto& field_name = expect(TokenKind::Identifier, "expected field name");
+        expect(TokenKind::Colon, "expected `:` after field name");
+        auto type = parseType();
+
+        ast::StructFieldDecl field;
+        field.name = tokenText(field_name);
+        field.span = spanFrom(field_name.span, type.span);
+        field.type = std::move(type);
+        declaration.fields.push_back(std::move(field));
+
+        if (!match(TokenKind::Comma) && !match(TokenKind::Semicolon) && !check(TokenKind::RightBrace)) {
+            errorAt(current(), "expected `,`, `;`, or `}` after struct field");
+            synchronizeStatement();
+        }
+    }
+
+    const auto end = expect(TokenKind::RightBrace, "expected `}` after struct declaration").span;
+    declaration.span = spanFrom(start, end);
+    return declaration;
+}
+
+std::optional<ast::ImplDecl> Parser::parseImpl() {
+    const auto start = expect(TokenKind::KwImpl, "expected `impl`").span;
+    ast::ImplDecl declaration;
+    declaration.target = parseType();
+    expect(TokenKind::LeftBrace, "expected `{` after impl target");
+
+    while (!check(TokenKind::RightBrace) && !isAtEnd()) {
+        if (!check(TokenKind::KwFn)) {
+            errorAt(current(), "expected method declaration inside `impl`");
+            synchronizeTopLevel();
+            if (check(TokenKind::RightBrace)) break;
+            continue;
+        }
+        if (auto method = parseFunction(true)) declaration.methods.push_back(std::move(*method));
+        else synchronizeTopLevel();
+    }
+
+    const auto end = expect(TokenKind::RightBrace, "expected `}` after impl block").span;
+    declaration.span = spanFrom(start, end);
+    return declaration;
 }
 
 ast::Parameter Parser::parseParameter() {
@@ -399,6 +488,7 @@ ast::ExprPtr Parser::parsePrimary() {
         }
         case TokenKind::Identifier: {
             advance();
+            if (looksLikeStructLiteral()) return parseStructLiteral(token);
             auto expression = std::make_unique<ast::IdentifierExpr>(tokenText(token));
             expression->span = token.span;
             return expression;
@@ -454,6 +544,44 @@ ast::ExprPtr Parser::parseArrayExpression() {
     const auto end = expect(TokenKind::RightBracket, "expected `]` after array literal").span;
     array->span = spanFrom(start, end);
     return array;
+}
+
+bool Parser::looksLikeStructLiteral() const noexcept {
+    if (!check(TokenKind::LeftBrace)) return false;
+    const auto first = current_index_ + 1;
+    const auto second = current_index_ + 2;
+    return second < tokens_.size() && tokens_[first].kind == TokenKind::Identifier &&
+           tokens_[second].kind == TokenKind::Colon;
+}
+
+ast::ExprPtr Parser::parseStructLiteral(const Token& type_name) {
+    ast::TypeRef type;
+    type.path.push_back(tokenText(type_name));
+    type.span = type_name.span;
+    auto literal = std::make_unique<ast::StructLiteralExpr>(std::move(type));
+    const auto start = type_name.span;
+    expect(TokenKind::LeftBrace, "expected `{` after struct type");
+
+    while (!check(TokenKind::RightBrace) && !isAtEnd()) {
+        const auto& field_name = expect(TokenKind::Identifier, "expected struct field name");
+        expect(TokenKind::Colon, "expected `:` after struct field name");
+        auto value = parseExpression();
+
+        ast::StructFieldInit field;
+        field.name = tokenText(field_name);
+        field.span = value ? spanFrom(field_name.span, value->span) : field_name.span;
+        field.value = std::move(value);
+        literal->fields.push_back(std::move(field));
+
+        if (!match(TokenKind::Comma) && !check(TokenKind::RightBrace)) {
+            errorAt(current(), "expected `,` or `}` after struct field initializer");
+            break;
+        }
+    }
+
+    const auto end = expect(TokenKind::RightBrace, "expected `}` after struct literal").span;
+    literal->span = spanFrom(start, end);
+    return literal;
 }
 
 ast::ExprPtr Parser::parsePostfix(ast::ExprPtr expression) {

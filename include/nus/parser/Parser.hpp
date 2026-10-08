@@ -32,7 +32,10 @@ private:
     void synchronizeTopLevel();
     void synchronizeStatement();
 
-    [[nodiscard]] std::optional<ast::FunctionDecl> parseFunction();
+    [[nodiscard]] std::optional<ast::FunctionDecl> parseFunction(bool allow_receiver = false);
+    [[nodiscard]] std::optional<ast::StructDecl> parseStruct();
+    [[nodiscard]] std::optional<ast::ImplDecl> parseImpl();
+    [[nodiscard]] bool parseReceiver(ast::FunctionDecl& function);
     [[nodiscard]] ast::Parameter parseParameter();
     [[nodiscard]] ast::TypeRef parseType();
     [[nodiscard]] std::unique_ptr<ast::BlockExpr> parseBlock();
@@ -47,6 +50,8 @@ private:
     [[nodiscard]] ast::ExprPtr parsePrefix();
     [[nodiscard]] ast::ExprPtr parsePrimary();
     [[nodiscard]] ast::ExprPtr parseArrayExpression();
+    [[nodiscard]] ast::ExprPtr parseStructLiteral(const Token& type_name);
+    [[nodiscard]] bool looksLikeStructLiteral() const noexcept;
     [[nodiscard]] ast::ExprPtr parsePostfix(ast::ExprPtr expression);
     [[nodiscard]] ast::ExprPtr parseIfExpression();
     [[nodiscard]] ast::ExprPtr parseWhileExpression();
