@@ -4,82 +4,179 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > High-level by default. Low-level by choice. Safe by default.
 
-## Milestone 5 — User-defined types
+## Milestone 6 — Ownership + Borrowing foundations
 
-The C++20 compiler frontend now supports the first nominal user-defined type model.
+The C++20 compiler frontend now implements the first memory-safety ownership model on top of the nominal type system introduced in Milestone 5.
 
 ### Implemented
 
-- source management, lexer, parser and AST
-- Pratt expression parser and control flow
-- lexical scopes, name resolution and primitive type checking
-- `struct` declarations
-- nominal struct types in parameters, returns and locals
-- struct literals with required named fields
-- field existence, duplicate-field and field-type validation
-- field access such as `packet.source`
-- field assignment with mutability propagation
-- `impl` blocks
-- method receivers: `self`, `&self`, `&mut self`
-- method lookup and argument/return-type checking
-- `&mut self` calls require a mutable receiver
-- method bodies can access and mutate `self` according to the receiver
-- AST debug output for structs, impls and struct literals
+- move semantics for non-`Copy` values
+- use-after-move diagnostics
+- scalar and shared-reference `Copy` behavior
+- `&T` and `&mut T` in function parameter types
+- `&value` and `&mut value` borrow expressions
+- shared-borrow tracking
+- exclusive mutable-borrow tracking
+- lexical borrow release at scope exit
+- temporary borrow release after calls/statements
+- mutation blocked while an owner is borrowed
+- moves blocked while an owner is borrowed
+- mutable borrow requires a mutable place
+- `&mut T` is non-`Copy`, preventing accidental mutable-reference aliasing
+- reference-aware field access and mutation
+- `self` consumes method receivers
+- `&self` creates/uses a shared borrow
+- `&mut self` creates/uses an exclusive mutable borrow
+- assignment can reinitialize a moved mutable binding
+- non-`Copy` array repetition is rejected
+- conservative safety restrictions for reference escape until lifetime inference exists
 
-Example:
+## Ownership model
+
+Primitive scalar values are `Copy`:
 
 ```nus
-struct Packet {
-    source: u32,
-    destination: u32,
+let a = 10;
+let b = a;
+print(a, b); // valid
+```
+
+Owned structures, strings and buffers use move semantics:
+
+```nus
+struct Packet { value: i32 }
+
+let packet = Packet { value: 1 };
+let moved = packet;
+print(packet.value); // error: use of moved value
+```
+
+Passing an owned non-`Copy` value to a by-value parameter also moves it:
+
+```nus
+fn send(packet: Packet) {}
+
+send(packet);
+print(packet.value); // error
+```
+
+## Borrowing
+
+Shared borrow:
+
+```nus
+fn inspect(packet: &Packet) {
+    print(packet.value);
 }
 
+inspect(&packet);
+```
+
+Multiple shared borrows may coexist:
+
+```nus
+let a = &packet;
+let b = &packet;
+```
+
+Exclusive mutable borrow:
+
+```nus
+fn update(packet: &mut Packet) {
+    packet.value = 42;
+}
+
+let mut packet = Packet { value: 1 };
+update(&mut packet);
+```
+
+A mutable borrow cannot coexist with another borrow:
+
+```nus
+let shared = &packet;
+let exclusive = &mut packet; // error: already borrowed
+```
+
+And the owner cannot be used directly while exclusively borrowed:
+
+```nus
+let mut packet = Packet { value: 1 };
+let reference = &mut packet;
+print(packet.value); // error
+```
+
+## Lexical borrow lifetimes
+
+Milestone 6 deliberately uses lexical lifetimes. A stored borrow lives until the end of its lexical scope:
+
+```nus
+let mut packet = Packet { value: 1 };
+
+if true {
+    let view = &packet;
+    print(view.value);
+} // borrow ends here
+
+packet.value = 2; // valid
+```
+
+Temporary borrows passed directly to a call end with the call:
+
+```nus
+inspect(&packet);
+update(&mut packet);
+```
+
+This model is intentionally more conservative than a future non-lexical lifetime (NLL) analysis, but it is simple, deterministic and memory-safe for the supported language subset.
+
+## Mutable references are not Copy
+
+Shared references can be copied. Mutable references cannot:
+
+```nus
+let mut packet = Packet { value: 1 };
+let first = &mut packet;
+let second = first;
+print(first.value); // error: first was moved
+```
+
+This prevents two independently usable `&mut` aliases from being created by ordinary assignment.
+
+## Receiver ownership
+
+Methods now participate in ownership semantics:
+
+```nus
 impl Packet {
-    fn route_key(&self) -> u32 {
-        self.source + self.destination
-    }
-
-    fn set_source(&mut self, source: u32) {
-        self.source = source;
-    }
-}
-
-fn main() {
-    let mut packet = Packet {
-        source: 10,
-        destination: 20,
-    };
-
-    packet.set_source(42);
-    print(packet.route_key());
+    fn inspect(&self) {}
+    fn update(&mut self) {}
+    fn consume(self) {}
 }
 ```
 
-## Semantic rules added in this milestone
+- `&self`: shared temporary borrow
+- `&mut self`: exclusive temporary borrow
+- `self`: consumes the receiver
 
-Struct names live in the type namespace. Struct fields are resolved from nominal type metadata rather than dynamically. A literal must initialize every declared field exactly once and cannot introduce unknown fields.
-
-Mutability propagates through field l-values:
-
-```nus
-let packet = Packet { source: 1, destination: 2 };
-packet.source = 10; // error: immutable base value
-```
+After:
 
 ```nus
-let mut packet = Packet { source: 1, destination: 2 };
-packet.source = 10; // valid
+packet.consume();
 ```
 
-Methods explicitly declare how they receive `self`:
+using `packet` again is a use-after-move error.
 
-```nus
-fn inspect(&self) { }
-fn update(&mut self) { }
-fn consume(self) { }
-```
+## Safe restrictions in this milestone
 
-Milestone 5 validates receiver mutability, but full move/borrow lifetime semantics are intentionally deferred to the ownership milestone.
+Full lifetime inference is not implemented yet. To avoid accepting dangling references, Milestone 6 intentionally rejects:
+
+- returning references from functions/methods
+- reference fields inside structs
+- borrowed values escaping a nested block expression
+
+These restrictions will be relaxed only when the compiler can prove the required lifetime relationships.
+
+The borrow analysis is also not path-sensitive yet. It prefers conservative rejection over accepting potentially unsafe code.
 
 ## Build
 
@@ -91,7 +188,7 @@ ctest --test-dir build --output-on-failure
 
 ## Use
 
-Run parsing + semantic analysis + AST output:
+Run parsing + semantic/ownership analysis + AST output:
 
 ```bash
 ./build/nusc example.nus
@@ -124,28 +221,25 @@ AST
     ↓
 SemanticAnalyzer
     ├── lexical SymbolTable
-    ├── primitive Type model
+    ├── Type model
     ├── nominal Struct registry
-    ├── field metadata
-    ├── method metadata
+    ├── name/type resolution
+    ├── move state
+    ├── shared borrow state
+    ├── mutable borrow state
     └── diagnostics
 ```
 
-## Current boundary
-
-This milestone does **not** claim full ownership or borrowing yet. `self`, `&self` and `&mut self` establish the semantic surface required for that work, while move tracking, borrow conflicts and lifetime analysis remain future work.
-
-Associated functions without a `self` receiver are also deferred; methods inside `impl` currently require a receiver.
-
 ## Next milestone
 
-Milestone 6 should introduce ownership and borrowing foundations:
+Milestone 7 should turn ownership from a local semantic feature into a stronger compiler model:
 
-1. value move tracking
-2. use-after-move diagnostics
-3. immutable and mutable borrow state
-4. borrow-conflict diagnostics
-5. explicit `&mut` expressions/type syntax
-6. reference-aware function parameters
-7. receiver consumption for `self`
-8. groundwork for deterministic destruction / `Drop`
+1. explicit ownership/borrow facts in an intermediate representation
+2. control-flow-aware move analysis
+3. non-lexical lifetime inference
+4. deterministic destruction points
+5. `Drop` groundwork
+6. reference escape analysis
+7. groundwork for HIR/MIR lowering
+
+After that, the compiler will be in a much better position to add enums/`Option`/`Result` and eventually native code generation without baking AST-specific assumptions into every semantic pass.

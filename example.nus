@@ -12,10 +12,18 @@ impl Packet {
     fn set_source(&mut self, source: u32) {
         self.source = source;
     }
+
+    fn consume(self) {
+        print(self.source, self.destination, self.payload_size);
+    }
 }
 
-fn inspect(packet: Packet) -> u32 {
-    packet.route_key()
+fn inspect(packet: &Packet) {
+    print(packet.route_key());
+}
+
+fn rewrite(packet: &mut Packet, source: u32) {
+    packet.source = source;
 }
 
 fn main() {
@@ -25,6 +33,14 @@ fn main() {
         payload_size: 1500,
     };
 
-    packet.set_source(42);
-    print(packet.source, packet.payload_size, inspect(packet));
+    inspect(&packet);
+    rewrite(&mut packet, 42);
+
+    if true {
+        let view = &packet;
+        print(view.source, view.payload_size);
+    }
+
+    packet.set_source(64);
+    packet.consume();
 }
