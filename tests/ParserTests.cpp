@@ -275,6 +275,52 @@ void testMutableTypedLet() {
     if (!let.type || let.type->name() != "u16") fail("expected explicit u16 type");
 }
 
+
+void testStructsImplsAndLiterals() {
+    auto parsed = parse(R"(
+        struct Packet {
+            source: u32,
+            size: usize,
+        }
+
+        impl Packet {
+            fn get_source(&self) -> u32 {
+                self.source
+            }
+
+            fn set_source(&mut self, value: u32) {
+                self.source = value;
+            }
+        }
+
+        fn main() {
+            let packet = Packet {
+                source: 10,
+                size: 64,
+            };
+            print(packet.get_source());
+        }
+    )");
+    expectNoDiagnostics(parsed);
+
+    if (parsed.file.structs.size() != 1) fail("expected one struct");
+    if (parsed.file.impls.size() != 1) fail("expected one impl");
+    if (parsed.file.structs[0].fields.size() != 2) fail("expected two struct fields");
+    if (parsed.file.impls[0].methods.size() != 2) fail("expected two methods");
+    if (parsed.file.impls[0].methods[0].receiver != nus::ast::ReceiverKind::Reference) {
+        fail("expected &self receiver");
+    }
+    if (parsed.file.impls[0].methods[1].receiver != nus::ast::ReceiverKind::MutableReference) {
+        fail("expected &mut self receiver");
+    }
+
+    const auto& main_body = *parsed.file.functions[0].body;
+    const auto& let = static_cast<const nus::ast::LetStmt&>(*main_body.statements[0]);
+    if (let.initializer->kind != nus::ast::ExprKind::StructLiteral) fail("expected struct literal");
+    const auto& literal = static_cast<const nus::ast::StructLiteralExpr&>(*let.initializer);
+    if (literal.type.name() != "Packet" || literal.fields.size() != 2) fail("wrong struct literal");
+}
+
 } // namespace
 
 int main() {
@@ -286,6 +332,7 @@ int main() {
     testArrayLiterals();
     testAssignmentExpressions();
     testLoopsAndRanges();
+    testStructsImplsAndLiterals();
     testInvalidAssignmentTargetDiagnostic();
     testMutableTypedLet();
     testParserDiagnostic();
