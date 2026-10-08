@@ -47,6 +47,7 @@ enum class ExprKind {
     Index,
     Array,
     Range,
+    StructLiteral,
     Block,
     If,
     While,
@@ -62,7 +63,6 @@ struct Expr : Node {
 struct LiteralExpr final : Expr {
     LiteralExpr(TokenKind literal_kind, std::string text)
         : Expr(ExprKind::Literal), literal_kind(literal_kind), text(std::move(text)) {}
-
     TokenKind literal_kind;
     std::string text;
 };
@@ -70,14 +70,12 @@ struct LiteralExpr final : Expr {
 struct IdentifierExpr final : Expr {
     explicit IdentifierExpr(std::string name)
         : Expr(ExprKind::Identifier), name(std::move(name)) {}
-
     std::string name;
 };
 
 struct UnaryExpr final : Expr {
     UnaryExpr(TokenKind op, ExprPtr operand)
         : Expr(ExprKind::Unary), op(op), operand(std::move(operand)) {}
-
     TokenKind op;
     ExprPtr operand;
 };
@@ -85,7 +83,6 @@ struct UnaryExpr final : Expr {
 struct BinaryExpr final : Expr {
     BinaryExpr(TokenKind op, ExprPtr left, ExprPtr right)
         : Expr(ExprKind::Binary), op(op), left(std::move(left)), right(std::move(right)) {}
-
     TokenKind op;
     ExprPtr left;
     ExprPtr right;
@@ -94,16 +91,13 @@ struct BinaryExpr final : Expr {
 struct AssignmentExpr final : Expr {
     AssignmentExpr(TokenKind op, ExprPtr target, ExprPtr value)
         : Expr(ExprKind::Assignment), op(op), target(std::move(target)), value(std::move(value)) {}
-
     TokenKind op;
     ExprPtr target;
     ExprPtr value;
 };
 
 struct CallExpr final : Expr {
-    explicit CallExpr(ExprPtr callee)
-        : Expr(ExprKind::Call), callee(std::move(callee)) {}
-
+    explicit CallExpr(ExprPtr callee) : Expr(ExprKind::Call), callee(std::move(callee)) {}
     ExprPtr callee;
     std::vector<ExprPtr> arguments;
 };
@@ -111,7 +105,6 @@ struct CallExpr final : Expr {
 struct MemberExpr final : Expr {
     MemberExpr(ExprPtr object, std::string member)
         : Expr(ExprKind::Member), object(std::move(object)), member(std::move(member)) {}
-
     ExprPtr object;
     std::string member;
 };
@@ -119,39 +112,38 @@ struct MemberExpr final : Expr {
 struct IndexExpr final : Expr {
     IndexExpr(ExprPtr object, ExprPtr index)
         : Expr(ExprKind::Index), object(std::move(object)), index(std::move(index)) {}
-
     ExprPtr object;
     ExprPtr index;
 };
 
 struct ArrayExpr final : Expr {
     ArrayExpr() : Expr(ExprKind::Array) {}
-
     std::vector<ExprPtr> elements;
     ExprPtr repeat_value;
     ExprPtr repeat_count;
-
-    [[nodiscard]] bool isRepeated() const noexcept {
-        return repeat_value != nullptr;
-    }
+    [[nodiscard]] bool isRepeated() const noexcept { return repeat_value != nullptr; }
 };
 
 struct RangeExpr final : Expr {
     RangeExpr(ExprPtr start, ExprPtr end, bool inclusive)
         : Expr(ExprKind::Range), start(std::move(start)), end(std::move(end)), inclusive(inclusive) {}
-
     ExprPtr start;
     ExprPtr end;
     bool inclusive{false};
 };
 
-enum class StmtKind {
-    Let,
-    Return,
-    Break,
-    Continue,
-    Expression,
+struct StructFieldInit : Node {
+    std::string name;
+    ExprPtr value;
 };
+
+struct StructLiteralExpr final : Expr {
+    explicit StructLiteralExpr(TypeRef type) : Expr(ExprKind::StructLiteral), type(std::move(type)) {}
+    TypeRef type;
+    std::vector<StructFieldInit> fields;
+};
+
+enum class StmtKind { Let, Return, Break, Continue, Expression };
 
 struct Stmt : Node {
     explicit Stmt(StmtKind kind) : kind(kind) {}
@@ -160,7 +152,6 @@ struct Stmt : Node {
 
 struct LetStmt final : Stmt {
     LetStmt() : Stmt(StmtKind::Let) {}
-
     std::string name;
     bool is_mutable{false};
     std::optional<TypeRef> type;
@@ -189,14 +180,12 @@ struct ExprStmt final : Stmt {
 
 struct BlockExpr final : Expr {
     BlockExpr() : Expr(ExprKind::Block) {}
-
     std::vector<StmtPtr> statements;
     ExprPtr tail_expression;
 };
 
 struct IfExpr final : Expr {
     IfExpr() : Expr(ExprKind::If) {}
-
     ExprPtr condition;
     std::unique_ptr<BlockExpr> then_branch;
     ExprPtr else_branch;
@@ -204,20 +193,17 @@ struct IfExpr final : Expr {
 
 struct WhileExpr final : Expr {
     WhileExpr() : Expr(ExprKind::While) {}
-
     ExprPtr condition;
     std::unique_ptr<BlockExpr> body;
 };
 
 struct LoopExpr final : Expr {
     LoopExpr() : Expr(ExprKind::Loop) {}
-
     std::unique_ptr<BlockExpr> body;
 };
 
 struct ForExpr final : Expr {
     ForExpr() : Expr(ExprKind::For) {}
-
     std::string binding;
     ExprPtr iterable;
     std::unique_ptr<BlockExpr> body;
@@ -228,14 +214,35 @@ struct Parameter : Node {
     TypeRef type;
 };
 
+enum class ReceiverKind { None, Value, Reference, MutableReference };
+
 struct FunctionDecl : Node {
     std::string name;
+    ReceiverKind receiver{ReceiverKind::None};
+    SourceSpan receiver_span{};
     std::vector<Parameter> parameters;
     std::optional<TypeRef> return_type;
     std::unique_ptr<BlockExpr> body;
 };
 
+struct StructFieldDecl : Node {
+    std::string name;
+    TypeRef type;
+};
+
+struct StructDecl : Node {
+    std::string name;
+    std::vector<StructFieldDecl> fields;
+};
+
+struct ImplDecl : Node {
+    TypeRef target;
+    std::vector<FunctionDecl> methods;
+};
+
 struct SourceFile : Node {
+    std::vector<StructDecl> structs;
+    std::vector<ImplDecl> impls;
     std::vector<FunctionDecl> functions;
 };
 
