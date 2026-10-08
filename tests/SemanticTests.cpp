@@ -309,6 +309,131 @@ void testDuplicateFunction() {
     )"), "duplicate function `ping`");
 }
 
+
+void testStructFieldsAndMethods() {
+    expectValid(check(R"(
+        struct Packet {
+            source: u32,
+            size: usize,
+        }
+
+        impl Packet {
+            fn get_source(&self) -> u32 {
+                self.source
+            }
+
+            fn set_source(&mut self, value: u32) {
+                self.source = value;
+            }
+        }
+
+        fn read(packet: Packet) -> u32 {
+            packet.get_source()
+        }
+
+        fn main() {
+            let mut packet = Packet {
+                source: 10,
+                size: 64,
+            };
+            packet.set_source(20);
+            print(packet.source, packet.size, read(packet));
+        }
+    )"));
+}
+
+void testStructLiteralMissingField() {
+    expectSemanticErrorContaining(check(R"(
+        struct Point { x: i32, y: i32 }
+        fn main() {
+            let point = Point { x: 1 };
+            print(point.x);
+        }
+    )"), "missing initializer for field `y`");
+}
+
+void testStructLiteralUnknownField() {
+    expectSemanticErrorContaining(check(R"(
+        struct Point { x: i32 }
+        fn main() {
+            let point = Point { x: 1, z: 2 };
+            print(point.x);
+        }
+    )"), "has no field `z`");
+}
+
+void testStructLiteralFieldTypeMismatch() {
+    expectSemanticErrorContaining(check(R"(
+        struct Point { x: i32 }
+        fn main() {
+            let point = Point { x: true };
+            print(point.x);
+        }
+    )"), "field `x` expects `i32`");
+}
+
+void testUnknownMember() {
+    expectSemanticErrorContaining(check(R"(
+        struct Point { x: i32 }
+        fn main() {
+            let point = Point { x: 1 };
+            print(point.y);
+        }
+    )"), "has no member `y`");
+}
+
+void testMutableReceiverRequiresMutableValue() {
+    expectSemanticErrorContaining(check(R"(
+        struct Counter { value: i32 }
+        impl Counter {
+            fn increment(&mut self) {
+                self.value += 1;
+            }
+        }
+        fn main() {
+            let counter = Counter { value: 0 };
+            counter.increment();
+        }
+    )"), "requires a mutable receiver");
+}
+
+void testMutableFieldAssignment() {
+    expectValid(check(R"(
+        struct Counter { value: i32 }
+        fn main() {
+            let mut counter = Counter { value: 0 };
+            counter.value = 10;
+            counter.value += 1;
+        }
+    )"));
+}
+
+void testImmutableFieldAssignment() {
+    expectSemanticErrorContaining(check(R"(
+        struct Counter { value: i32 }
+        fn main() {
+            let counter = Counter { value: 0 };
+            counter.value = 10;
+        }
+    )"), "immutable");
+}
+
+void testDuplicateStructField() {
+    expectSemanticErrorContaining(check(R"(
+        struct Broken { value: i32, value: bool }
+        fn main() {}
+    )"), "duplicate field `value`");
+}
+
+void testUnknownImplTarget() {
+    expectSemanticErrorContaining(check(R"(
+        impl Missing {
+            fn ping(&self) {}
+        }
+        fn main() {}
+    )"), "cannot implement unknown struct `Missing`");
+}
+
 } // namespace
 
 int main() {
@@ -336,6 +461,16 @@ int main() {
     testInvalidNumericSuffix();
     testUnknownType();
     testDuplicateFunction();
+    testStructFieldsAndMethods();
+    testStructLiteralMissingField();
+    testStructLiteralUnknownField();
+    testStructLiteralFieldTypeMismatch();
+    testUnknownMember();
+    testMutableReceiverRequiresMutableValue();
+    testMutableFieldAssignment();
+    testImmutableFieldAssignment();
+    testDuplicateStructField();
+    testUnknownImplTarget();
     std::cout << "semantic tests passed\n";
     return 0;
 }
