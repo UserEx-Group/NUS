@@ -39,17 +39,26 @@ private:
     [[nodiscard]] ast::StmtPtr parseStatement();
     [[nodiscard]] ast::StmtPtr parseLetStatement();
     [[nodiscard]] ast::StmtPtr parseReturnStatement();
+    [[nodiscard]] ast::StmtPtr parseBreakStatement();
+    [[nodiscard]] ast::StmtPtr parseContinueStatement();
     [[nodiscard]] ast::StmtPtr parseExpressionStatement();
 
     [[nodiscard]] ast::ExprPtr parseExpression(int min_precedence = 1);
     [[nodiscard]] ast::ExprPtr parsePrefix();
     [[nodiscard]] ast::ExprPtr parsePrimary();
+    [[nodiscard]] ast::ExprPtr parseArrayExpression();
     [[nodiscard]] ast::ExprPtr parsePostfix(ast::ExprPtr expression);
     [[nodiscard]] ast::ExprPtr parseIfExpression();
+    [[nodiscard]] ast::ExprPtr parseWhileExpression();
+    [[nodiscard]] ast::ExprPtr parseLoopExpression();
+    [[nodiscard]] ast::ExprPtr parseForExpression();
 
     [[nodiscard]] static int binaryPrecedence(TokenKind kind) noexcept;
     [[nodiscard]] static bool isRightAssociative(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isAssignmentOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isRangeOperator(TokenKind kind) noexcept;
     [[nodiscard]] static bool isUnaryOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isAssignable(const ast::Expr& expression) noexcept;
     [[nodiscard]] static bool isBlockLike(const ast::Expr& expression) noexcept;
     [[nodiscard]] SourceSpan spanFrom(SourceSpan first, SourceSpan last) const noexcept;
     [[nodiscard]] std::string tokenText(const Token& token) const;

@@ -73,7 +73,12 @@ void Parser::synchronizeStatement() {
         switch (current().kind) {
             case TokenKind::KwLet:
             case TokenKind::KwReturn:
+            case TokenKind::KwBreak:
+            case TokenKind::KwContinue:
             case TokenKind::KwIf:
+            case TokenKind::KwWhile:
+            case TokenKind::KwLoop:
+            case TokenKind::KwFor:
             case TokenKind::RightBrace:
                 return;
             default:
@@ -92,7 +97,7 @@ ast::SourceFile Parser::parseSourceFile() {
 
     while (!isAtEnd()) {
         if (!check(TokenKind::KwFn)) {
-            errorAt(current(), "expected top-level declaration; milestone 2 currently supports `fn`");
+            errorAt(current(), "expected top-level declaration; milestone 3 currently supports `fn`");
             synchronizeTopLevel();
             continue;
         }
@@ -178,7 +183,8 @@ std::unique_ptr<ast::BlockExpr> Parser::parseBlock() {
     auto block = std::make_unique<ast::BlockExpr>();
 
     while (!check(TokenKind::RightBrace) && !isAtEnd()) {
-        if (check(TokenKind::KwLet) || check(TokenKind::KwReturn)) {
+        if (check(TokenKind::KwLet) || check(TokenKind::KwReturn) ||
+            check(TokenKind::KwBreak) || check(TokenKind::KwContinue)) {
             if (auto statement = parseStatement()) block->statements.push_back(std::move(statement));
             continue;
         }
@@ -224,6 +230,8 @@ std::unique_ptr<ast::BlockExpr> Parser::parseBlock() {
 ast::StmtPtr Parser::parseStatement() {
     if (check(TokenKind::KwLet)) return parseLetStatement();
     if (check(TokenKind::KwReturn)) return parseReturnStatement();
+    if (check(TokenKind::KwBreak)) return parseBreakStatement();
+    if (check(TokenKind::KwContinue)) return parseContinueStatement();
     return parseExpressionStatement();
 }
 
@@ -260,6 +268,28 @@ ast::StmtPtr Parser::parseReturnStatement() {
     return statement;
 }
 
+ast::StmtPtr Parser::parseBreakStatement() {
+    const auto start = expect(TokenKind::KwBreak, "expected `break`").span;
+    auto statement = std::make_unique<ast::BreakStmt>();
+
+    if (!check(TokenKind::Semicolon)) {
+        statement->value = parseExpression();
+    }
+
+    const auto end = expect(TokenKind::Semicolon, "expected `;` after break statement").span;
+    statement->span = spanFrom(start, end);
+    return statement;
+}
+
+ast::StmtPtr Parser::parseContinueStatement() {
+    const auto start = expect(TokenKind::KwContinue, "expected `continue`").span;
+    const auto end = expect(TokenKind::Semicolon, "expected `;` after continue statement").span;
+
+    auto statement = std::make_unique<ast::ContinueStmt>();
+    statement->span = spanFrom(start, end);
+    return statement;
+}
+
 ast::StmtPtr Parser::parseExpressionStatement() {
     auto expression = parseExpression();
     if (!expression) return nullptr;
@@ -291,12 +321,33 @@ ast::ExprPtr Parser::parseExpression(int min_precedence) {
         const int precedence = binaryPrecedence(op);
         if (precedence < min_precedence) break;
 
-        advance();
+        const auto op_token = advance();
         const int next_min = isRightAssociative(op) ? precedence : precedence + 1;
         auto right = parseExpression(next_min);
         if (!right) {
-            errorAt(current(), "expected expression after binary operator");
+            errorAt(current(), "expected expression after operator");
             return left;
+        }
+
+        if (isAssignmentOperator(op)) {
+            if (!isAssignable(*left)) {
+                errorAt(op_token, "left side of assignment is not assignable");
+            }
+            auto assignment = std::make_unique<ast::AssignmentExpr>(op, std::move(left), std::move(right));
+            assignment->span = spanFrom(assignment->target->span, assignment->value->span);
+            left = std::move(assignment);
+            continue;
+        }
+
+        if (isRangeOperator(op)) {
+            if (left->kind == ast::ExprKind::Range) {
+                errorAt(op_token, "range operators are not associative");
+            }
+            auto range = std::make_unique<ast::RangeExpr>(
+                std::move(left), std::move(right), op == TokenKind::DotDotEqual);
+            range->span = spanFrom(range->start->span, range->end->span);
+            left = std::move(range);
+            continue;
         }
 
         auto binary = std::make_unique<ast::BinaryExpr>(op, std::move(left), std::move(right));
@@ -309,10 +360,13 @@ ast::ExprPtr Parser::parseExpression(int min_precedence) {
 
 ast::ExprPtr Parser::parsePrefix() {
     if (check(TokenKind::KwIf)) return parseIfExpression();
+    if (check(TokenKind::KwWhile)) return parseWhileExpression();
+    if (check(TokenKind::KwLoop)) return parseLoopExpression();
+    if (check(TokenKind::KwFor)) return parseForExpression();
 
     if (isUnaryOperator(current().kind)) {
         const auto op = advance();
-        auto operand = parseExpression(12);
+        auto operand = parseExpression(13);
         if (!operand) {
             errorAt(current(), "expected operand after unary operator");
             return nullptr;
@@ -356,6 +410,8 @@ ast::ExprPtr Parser::parsePrimary() {
             if (expression) expression->span = spanFrom(start, end);
             return expression;
         }
+        case TokenKind::LeftBracket:
+            return parseArrayExpression();
         default:
             errorAt(token, "expected expression");
             if (!isAtEnd()) advance();
@@ -363,22 +419,82 @@ ast::ExprPtr Parser::parsePrimary() {
     }
 }
 
-ast::ExprPtr Parser::parsePostfix(ast::ExprPtr expression) {
-    while (check(TokenKind::LeftParen)) {
-        const auto start = expression->span;
-        advance();
+ast::ExprPtr Parser::parseArrayExpression() {
+    const auto start = expect(TokenKind::LeftBracket, "expected `[`").span;
+    auto array = std::make_unique<ast::ArrayExpr>();
 
-        auto call = std::make_unique<ast::CallExpr>(std::move(expression));
-        if (!check(TokenKind::RightParen)) {
-            do {
-                auto argument = parseExpression();
-                if (argument) call->arguments.push_back(std::move(argument));
-            } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+    if (match(TokenKind::RightBracket)) {
+        array->span = spanFrom(start, previous().span);
+        return array;
+    }
+
+    auto first = parseExpression();
+    if (!first) {
+        expect(TokenKind::RightBracket, "expected `]` after array expression");
+        array->span = spanFrom(start, previous().span);
+        return array;
+    }
+
+    if (match(TokenKind::Semicolon)) {
+        array->repeat_value = std::move(first);
+        array->repeat_count = parseExpression();
+        const auto end = expect(TokenKind::RightBracket, "expected `]` after repeated array").span;
+        array->span = spanFrom(start, end);
+        return array;
+    }
+
+    array->elements.push_back(std::move(first));
+    while (match(TokenKind::Comma)) {
+        if (check(TokenKind::RightBracket)) break;
+        auto element = parseExpression();
+        if (!element) break;
+        array->elements.push_back(std::move(element));
+    }
+
+    const auto end = expect(TokenKind::RightBracket, "expected `]` after array literal").span;
+    array->span = spanFrom(start, end);
+    return array;
+}
+
+ast::ExprPtr Parser::parsePostfix(ast::ExprPtr expression) {
+    while (true) {
+        if (match(TokenKind::LeftParen)) {
+            const auto start = expression->span;
+            auto call = std::make_unique<ast::CallExpr>(std::move(expression));
+
+            if (!check(TokenKind::RightParen)) {
+                do {
+                    auto argument = parseExpression();
+                    if (argument) call->arguments.push_back(std::move(argument));
+                } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+            }
+
+            const auto end = expect(TokenKind::RightParen, "expected `)` after arguments").span;
+            call->span = spanFrom(start, end);
+            expression = std::move(call);
+            continue;
         }
 
-        const auto end = expect(TokenKind::RightParen, "expected `)` after arguments").span;
-        call->span = spanFrom(start, end);
-        expression = std::move(call);
+        if (match(TokenKind::Dot)) {
+            const auto start = expression->span;
+            const auto& member = expect(TokenKind::Identifier, "expected member name after `.`");
+            auto member_expr = std::make_unique<ast::MemberExpr>(std::move(expression), tokenText(member));
+            member_expr->span = spanFrom(start, member.span);
+            expression = std::move(member_expr);
+            continue;
+        }
+
+        if (match(TokenKind::LeftBracket)) {
+            const auto start = expression->span;
+            auto index = parseExpression();
+            const auto end = expect(TokenKind::RightBracket, "expected `]` after index expression").span;
+            auto index_expr = std::make_unique<ast::IndexExpr>(std::move(expression), std::move(index));
+            index_expr->span = spanFrom(start, end);
+            expression = std::move(index_expr);
+            continue;
+        }
+
+        break;
     }
 
     return expression;
@@ -412,6 +528,54 @@ ast::ExprPtr Parser::parseIfExpression() {
     return expression;
 }
 
+ast::ExprPtr Parser::parseWhileExpression() {
+    const auto start = expect(TokenKind::KwWhile, "expected `while`").span;
+    auto expression = std::make_unique<ast::WhileExpr>();
+    expression->condition = parseExpression();
+
+    if (!check(TokenKind::LeftBrace)) {
+        errorAt(current(), "expected `{` after while condition");
+        return expression;
+    }
+
+    expression->body = parseBlock();
+    expression->span = spanFrom(start, expression->body->span);
+    return expression;
+}
+
+ast::ExprPtr Parser::parseLoopExpression() {
+    const auto start = expect(TokenKind::KwLoop, "expected `loop`").span;
+    auto expression = std::make_unique<ast::LoopExpr>();
+
+    if (!check(TokenKind::LeftBrace)) {
+        errorAt(current(), "expected `{` after `loop`");
+        return expression;
+    }
+
+    expression->body = parseBlock();
+    expression->span = spanFrom(start, expression->body->span);
+    return expression;
+}
+
+ast::ExprPtr Parser::parseForExpression() {
+    const auto start = expect(TokenKind::KwFor, "expected `for`").span;
+    const auto& binding = expect(TokenKind::Identifier, "expected loop binding after `for`");
+    expect(TokenKind::KwIn, "expected `in` after for-loop binding");
+
+    auto expression = std::make_unique<ast::ForExpr>();
+    expression->binding = tokenText(binding);
+    expression->iterable = parseExpression();
+
+    if (!check(TokenKind::LeftBrace)) {
+        errorAt(current(), "expected `{` after for-loop iterable");
+        return expression;
+    }
+
+    expression->body = parseBlock();
+    expression->span = spanFrom(start, expression->body->span);
+    return expression;
+}
+
 int Parser::binaryPrecedence(TokenKind kind) noexcept {
     switch (kind) {
         case TokenKind::Equal:
@@ -426,36 +590,62 @@ int Parser::binaryPrecedence(TokenKind kind) noexcept {
         case TokenKind::ShiftLeftEqual:
         case TokenKind::ShiftRightEqual:
             return 1;
-        case TokenKind::PipePipe: return 2;
-        case TokenKind::AmpersandAmpersand: return 3;
-        case TokenKind::Pipe: return 4;
-        case TokenKind::Caret: return 5;
-        case TokenKind::Ampersand: return 6;
+        case TokenKind::DotDot:
+        case TokenKind::DotDotEqual:
+            return 2;
+        case TokenKind::PipePipe: return 3;
+        case TokenKind::AmpersandAmpersand: return 4;
+        case TokenKind::Pipe: return 5;
+        case TokenKind::Caret: return 6;
+        case TokenKind::Ampersand: return 7;
         case TokenKind::EqualEqual:
         case TokenKind::BangEqual:
-            return 7;
+            return 8;
         case TokenKind::Less:
         case TokenKind::LessEqual:
         case TokenKind::Greater:
         case TokenKind::GreaterEqual:
-            return 8;
+            return 9;
         case TokenKind::ShiftLeft:
         case TokenKind::ShiftRight:
-            return 9;
+            return 10;
         case TokenKind::Plus:
         case TokenKind::Minus:
-            return 10;
+            return 11;
         case TokenKind::Star:
         case TokenKind::Slash:
         case TokenKind::Percent:
-            return 11;
+            return 12;
         default:
             return 0;
     }
 }
 
 bool Parser::isRightAssociative(TokenKind kind) noexcept {
-    return binaryPrecedence(kind) == 1;
+    return isAssignmentOperator(kind);
+}
+
+bool Parser::isAssignmentOperator(TokenKind kind) noexcept {
+    switch (kind) {
+        case TokenKind::Equal:
+        case TokenKind::PlusEqual:
+        case TokenKind::MinusEqual:
+        case TokenKind::StarEqual:
+        case TokenKind::SlashEqual:
+        case TokenKind::PercentEqual:
+        case TokenKind::AmpersandEqual:
+        case TokenKind::PipeEqual:
+        case TokenKind::CaretEqual:
+        case TokenKind::ShiftLeftEqual:
+        case TokenKind::ShiftRightEqual:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Parser::isRangeOperator(TokenKind kind) noexcept {
+    return kind == TokenKind::DotDot || kind == TokenKind::DotDotEqual;
 }
 
 bool Parser::isUnaryOperator(TokenKind kind) noexcept {
@@ -472,8 +662,23 @@ bool Parser::isUnaryOperator(TokenKind kind) noexcept {
     }
 }
 
+bool Parser::isAssignable(const ast::Expr& expression) noexcept {
+    return expression.kind == ast::ExprKind::Identifier ||
+           expression.kind == ast::ExprKind::Member ||
+           expression.kind == ast::ExprKind::Index;
+}
+
 bool Parser::isBlockLike(const ast::Expr& expression) noexcept {
-    return expression.kind == ast::ExprKind::If || expression.kind == ast::ExprKind::Block;
+    switch (expression.kind) {
+        case ast::ExprKind::If:
+        case ast::ExprKind::Block:
+        case ast::ExprKind::While:
+        case ast::ExprKind::Loop:
+        case ast::ExprKind::For:
+            return true;
+        default:
+            return false;
+    }
 }
 
 SourceSpan Parser::spanFrom(SourceSpan first, SourceSpan last) const noexcept {
