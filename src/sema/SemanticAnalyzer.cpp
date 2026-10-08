@@ -144,6 +144,11 @@ void SemanticAnalyzer::reset() {
     structs_.clear();
     current_return_type_ = unitType();
     loop_depth_ = 0;
+    next_symbol_id_ = 1;
+    borrow_scopes_.clear();
+    borrow_scopes_.emplace_back();
+    temporary_borrow_frames_.clear();
+    persist_borrows_ = false;
 }
 
 void SemanticAnalyzer::analyze(const ast::SourceFile& file) {
@@ -175,12 +180,14 @@ const Type* SemanticAnalyzer::typeOf(const ast::Expr& expression) const noexcept
 
 void SemanticAnalyzer::registerBuiltins() {
     Symbol print;
+    print.id = next_symbol_id_++;
     print.name = "print";
     print.kind = SymbolKind::BuiltinFunction;
     print.type = Type::function({}, unitType(), true);
     (void)symbols_.declare(std::move(print));
 
     Symbol assert_symbol;
+    assert_symbol.id = next_symbol_id_++;
     assert_symbol.name = "assert";
     assert_symbol.kind = SymbolKind::BuiltinFunction;
     assert_symbol.type = Type::function({boolType()}, unitType());
@@ -213,7 +220,11 @@ void SemanticAnalyzer::collectStructFields(const ast::SourceFile& file) {
                 error(field.span, "duplicate field `" + field.name + "` in struct `" + structure.name + "`");
                 continue;
             }
-            info.fields.emplace(field.name, resolveType(field.type));
+            Type field_type = resolveType(field.type);
+            if (field_type.containsReference()) {
+                error(field.type.span, "reference fields require lifetime inference and are not supported yet");
+            }
+            info.fields.emplace(field.name, std::move(field_type));
         }
     }
 }
@@ -224,8 +235,12 @@ void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
         parameters.reserve(function.parameters.size());
         for (const auto& parameter : function.parameters) parameters.push_back(resolveType(parameter.type));
         const Type result = function.return_type ? resolveType(*function.return_type) : unitType();
+        if (function.return_type && result.containsReference()) {
+            error(function.return_type->span, "returning references is not supported until lifetime inference is implemented");
+        }
 
         Symbol symbol;
+        symbol.id = next_symbol_id_++;
         symbol.name = function.name;
         symbol.kind = SymbolKind::Function;
         symbol.type = Type::function(std::move(parameters), result);
@@ -259,6 +274,9 @@ void SemanticAnalyzer::collectMethods(const ast::SourceFile& file) {
             parameters.reserve(method.parameters.size());
             for (const auto& parameter : method.parameters) parameters.push_back(resolveType(parameter.type));
             const Type result = method.return_type ? resolveType(*method.return_type) : unitType();
+            if (method.return_type && result.containsReference()) {
+                error(method.return_type->span, "returning references is not supported until lifetime inference is implemented");
+            }
             Type signature = Type::function(std::move(parameters), result);
             function_signatures_.insert_or_assign(&method, signature);
             struct_it->second.methods.emplace(method.name, MethodInfo{
@@ -277,11 +295,12 @@ void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
                                : Type::function({}, unitType());
     current_return_type_ = signature.return_type ? *signature.return_type : unitType();
     loop_depth_ = 0;
-    symbols_.pushScope();
+    pushScope();
 
     for (std::size_t index = 0; index < function.parameters.size(); ++index) {
         const auto& parameter = function.parameters[index];
         Symbol symbol;
+        symbol.id = next_symbol_id_++;
         symbol.name = parameter.name;
         symbol.kind = SymbolKind::Parameter;
         symbol.type = index < signature.parameters.size() ? signature.parameters[index] : errorType();
@@ -299,7 +318,7 @@ void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
               "` but `" + current_return_type_.name() + "` is required");
     }
 
-    symbols_.popScope();
+    popScope();
 }
 
 void SemanticAnalyzer::analyzeMethod(const std::string& target_name, const ast::FunctionDecl& method) {
@@ -309,7 +328,7 @@ void SemanticAnalyzer::analyzeMethod(const std::string& target_name, const ast::
                                : Type::function({}, unitType());
     current_return_type_ = signature.return_type ? *signature.return_type : unitType();
     loop_depth_ = 0;
-    symbols_.pushScope();
+    pushScope();
 
     if (method.receiver != ast::ReceiverKind::None) {
         Type self_type = Type::structure(target_name);
@@ -320,6 +339,7 @@ void SemanticAnalyzer::analyzeMethod(const std::string& target_name, const ast::
             self_mutable = true;
         }
         Symbol self_symbol;
+        self_symbol.id = next_symbol_id_++;
         self_symbol.name = "self";
         self_symbol.kind = SymbolKind::Parameter;
         self_symbol.type = std::move(self_type);
@@ -331,6 +351,7 @@ void SemanticAnalyzer::analyzeMethod(const std::string& target_name, const ast::
     for (std::size_t index = 0; index < method.parameters.size(); ++index) {
         const auto& parameter = method.parameters[index];
         Symbol symbol;
+        symbol.id = next_symbol_id_++;
         symbol.name = parameter.name;
         symbol.kind = SymbolKind::Parameter;
         symbol.type = index < signature.parameters.size() ? signature.parameters[index] : errorType();
@@ -348,32 +369,62 @@ void SemanticAnalyzer::analyzeMethod(const std::string& target_name, const ast::
               "` but `" + current_return_type_.name() + "` is required");
     }
 
-    symbols_.popScope();
+    popScope();
 }
 
 Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
-    const auto name = type_ref.name();
-    if (const auto kind = simpleTypeKind(name)) return Type::simple(*kind);
-    if (structs_.contains(name)) return Type::structure(name);
-    error(type_ref.span, "unknown type `" + name + "`");
-    return errorType();
+    std::string base_name;
+    for (std::size_t i = 0; i < type_ref.path.size(); ++i) {
+        if (i != 0) base_name += "::";
+        base_name += type_ref.path[i];
+    }
+
+    Type base = errorType();
+    if (const auto kind = simpleTypeKind(base_name)) {
+        base = Type::simple(*kind);
+    } else if (structs_.contains(base_name)) {
+        base = Type::structure(base_name);
+    } else {
+        error(type_ref.span, "unknown type `" + base_name + "`");
+        return errorType();
+    }
+
+    if (type_ref.is_reference) return Type::reference(std::move(base), type_ref.is_mutable_reference);
+    return base;
 }
 
 Type SemanticAnalyzer::checkBlock(const ast::BlockExpr& block, bool create_scope) {
-    if (create_scope) symbols_.pushScope();
+    if (create_scope) pushScope();
 
     for (const auto& statement : block.statements) checkStatement(*statement);
-    Type result = block.tail_expression ? checkExpr(*block.tail_expression) : unitType();
 
-    if (create_scope) symbols_.popScope();
+    Type result = unitType();
+    if (block.tail_expression) {
+        beginTemporaryBorrowFrame();
+        result = checkExpr(*block.tail_expression);
+        if (create_scope && persist_borrows_ && result.containsReference()) {
+            error(block.tail_expression->span,
+                  "borrowed values cannot escape a nested block until lifetime inference is implemented");
+        }
+        consumeValue(*block.tail_expression, result, "block result");
+        endTemporaryBorrowFrame();
+    }
+
+    if (create_scope) popScope();
     return result;
 }
 
 void SemanticAnalyzer::checkStatement(const ast::Stmt& statement) {
+    beginTemporaryBorrowFrame();
+
     switch (statement.kind) {
         case ast::StmtKind::Let: {
             const auto& let = static_cast<const ast::LetStmt&>(statement);
+            const bool previous_persistence = persist_borrows_;
+            persist_borrows_ = true;
             const Type initializer_type = checkExpr(*let.initializer);
+            persist_borrows_ = previous_persistence;
+
             Type declared_type = initializer_type;
             if (let.type) {
                 declared_type = resolveType(*let.type);
@@ -384,7 +435,10 @@ void SemanticAnalyzer::checkStatement(const ast::Stmt& statement) {
                 }
             }
 
+            consumeValue(*let.initializer, initializer_type, "initializer");
+
             Symbol symbol;
+            symbol.id = next_symbol_id_++;
             symbol.name = let.name;
             symbol.kind = SymbolKind::Variable;
             symbol.type = declared_type;
@@ -408,6 +462,8 @@ void SemanticAnalyzer::checkStatement(const ast::Stmt& statement) {
                 error(ret.value->span,
                       "return type mismatch: expected `" + current_return_type_.name() +
                       "`, found `" + actual.name() + "`");
+            } else {
+                consumeValue(*ret.value, actual, "return value");
             }
             break;
         }
@@ -426,10 +482,13 @@ void SemanticAnalyzer::checkStatement(const ast::Stmt& statement) {
         }
         case ast::StmtKind::Expression: {
             const auto& expr = static_cast<const ast::ExprStmt&>(statement);
-            (void)checkExpr(*expr.expression);
+            const Type type = checkExpr(*expr.expression);
+            consumeValue(*expr.expression, type, "expression result");
             break;
         }
     }
+
+    endTemporaryBorrowFrame();
 }
 
 Type SemanticAnalyzer::checkExpr(const ast::Expr& expression) {
@@ -442,6 +501,13 @@ Type SemanticAnalyzer::checkExpr(const ast::Expr& expression) {
             const auto& identifier = static_cast<const ast::IdentifierExpr&>(expression);
             if (const auto* symbol = symbols_.lookup(identifier.name)) {
                 result = symbol->type;
+                if (symbol->kind != SymbolKind::Function && symbol->kind != SymbolKind::BuiltinFunction) {
+                    if (symbol->is_moved) {
+                        error(expression.span, "use of moved value `" + identifier.name + "`");
+                    } else if (symbol->mutable_borrowed) {
+                        error(expression.span, "cannot use `" + identifier.name + "` while it is mutably borrowed");
+                    }
+                }
             } else {
                 error(expression.span, "undefined name `" + identifier.name + "`");
             }
@@ -539,6 +605,17 @@ Type SemanticAnalyzer::checkLiteral(const ast::LiteralExpr& expression) {
 }
 
 Type SemanticAnalyzer::checkUnary(const ast::UnaryExpr& expression) {
+    if (expression.op == TokenKind::Ampersand) {
+        const LValueInfo place = checkLValue(*expression.operand);
+        if (place.type.isError()) return errorType();
+        if (expression.mutable_borrow && !place.is_mutable) {
+            error(expression.span, "cannot mutably borrow an immutable value");
+            return Type::reference(place.type, true);
+        }
+        (void)borrowPlace(*expression.operand, expression.mutable_borrow, expression.span);
+        return Type::reference(place.type, expression.mutable_borrow);
+    }
+
     const Type operand = checkExpr(*expression.operand);
     if (operand.isError()) return operand;
 
@@ -555,8 +632,6 @@ Type SemanticAnalyzer::checkUnary(const ast::UnaryExpr& expression) {
                 return errorType();
             }
             return operand;
-        case TokenKind::Ampersand:
-            return Type::reference(operand);
         case TokenKind::Star:
             if (operand.kind != TypeKind::Reference || !operand.element) {
                 error(expression.span, "cannot dereference value of type `" + operand.name() + "`");
@@ -643,31 +718,45 @@ Type SemanticAnalyzer::checkAssignment(const ast::AssignmentExpr& expression) {
     const Type value = checkExpr(*expression.value);
     if (target.type.isError() || value.isError()) return errorType();
 
+    Symbol* root = rootSymbol(*expression.target);
+    if (root && (root->shared_borrows > 0 || root->mutable_borrowed)) {
+        error(expression.target->span, "cannot assign to `" + root->name + "` while it is borrowed");
+    }
+
     if (!target.is_mutable) {
         error(expression.target->span, "cannot assign to immutable value");
     }
 
+    bool compatible_assignment = true;
     if (expression.op == TokenKind::Equal) {
         if (!compatible(target.type, value, expression.value.get())) {
+            compatible_assignment = false;
             error(expression.value->span,
                   "cannot assign value of type `" + value.name() + "` to `" + target.type.name() + "`");
         }
-        return unitType();
+    } else {
+        const TokenKind base = compoundBaseOperator(expression.op);
+        if (isArithmeticOperator(base)) {
+            if (!target.type.isNumeric() || !value.isNumeric() || !compatible(target.type, value, expression.value.get())) {
+                compatible_assignment = false;
+                error(expression.span, "compound arithmetic assignment requires compatible numeric operands");
+            }
+        } else if (isBitwiseOperator(base)) {
+            if (!target.type.isInteger() || !value.isInteger() || !compatible(target.type, value, expression.value.get())) {
+                compatible_assignment = false;
+                error(expression.span, "compound bitwise assignment requires compatible integer operands");
+            }
+        } else if (isShiftOperator(base)) {
+            if (!target.type.isInteger() || !value.isInteger()) {
+                compatible_assignment = false;
+                error(expression.span, "compound shift assignment requires integer operands");
+            }
+        }
     }
 
-    const TokenKind base = compoundBaseOperator(expression.op);
-    if (isArithmeticOperator(base)) {
-        if (!target.type.isNumeric() || !value.isNumeric() || !compatible(target.type, value, expression.value.get())) {
-            error(expression.span, "compound arithmetic assignment requires compatible numeric operands");
-        }
-    } else if (isBitwiseOperator(base)) {
-        if (!target.type.isInteger() || !value.isInteger() || !compatible(target.type, value, expression.value.get())) {
-            error(expression.span, "compound bitwise assignment requires compatible integer operands");
-        }
-    } else if (isShiftOperator(base)) {
-        if (!target.type.isInteger() || !value.isInteger()) {
-            error(expression.span, "compound shift assignment requires integer operands");
-        }
+    if (compatible_assignment) {
+        consumeValue(*expression.value, value, "assignment");
+        if (expression.op == TokenKind::Equal) reinitializeIfDirectIdentifier(*expression.target);
     }
     return unitType();
 }
@@ -679,7 +768,12 @@ Type SemanticAnalyzer::checkCall(const ast::CallExpr& expression) {
 
     const Type callee = checkExpr(*expression.callee);
     if (callee.kind != TypeKind::Function) {
+        beginTemporaryBorrowFrame();
+        const bool old_persistence = persist_borrows_;
+        persist_borrows_ = false;
         for (const auto& argument : expression.arguments) (void)checkExpr(*argument);
+        persist_borrows_ = old_persistence;
+        endTemporaryBorrowFrame();
         if (!callee.isError()) error(expression.callee->span, "value of type `" + callee.name() + "` is not callable");
         return errorType();
     }
@@ -690,6 +784,10 @@ Type SemanticAnalyzer::checkCall(const ast::CallExpr& expression) {
               std::to_string(expression.arguments.size()));
     }
 
+    beginTemporaryBorrowFrame();
+    const bool old_persistence = persist_borrows_;
+    persist_borrows_ = false;
+
     for (std::size_t i = 0; i < expression.arguments.size(); ++i) {
         const Type actual = checkExpr(*expression.arguments[i]);
         if (callee.variadic_any || i >= callee.parameters.size()) continue;
@@ -698,9 +796,15 @@ Type SemanticAnalyzer::checkCall(const ast::CallExpr& expression) {
             error(expression.arguments[i]->span,
                   "argument " + std::to_string(i + 1) + " expects `" + expected.name() +
                   "`, found `" + actual.name() + "`");
+            continue;
+        }
+        if (!expected.isReference()) {
+            consumeValue(*expression.arguments[i], actual, "function argument");
         }
     }
 
+    persist_borrows_ = old_persistence;
+    endTemporaryBorrowFrame();
     return callee.return_type ? *callee.return_type : unitType();
 }
 
@@ -720,9 +824,31 @@ Type SemanticAnalyzer::checkMethodCall(const ast::CallExpr& expression, const as
     }
 
     recordType(member, method->signature);
-    if (method->receiver == ast::ReceiverKind::MutableReference) {
-        const auto receiver = checkLValue(*member.object);
-        if (!receiver.is_mutable) error(member.object->span, "method `" + member.member + "` requires a mutable receiver");
+    beginTemporaryBorrowFrame();
+    const bool old_persistence = persist_borrows_;
+    persist_borrows_ = false;
+
+    if (method->receiver == ast::ReceiverKind::Value) {
+        if (object_type.isReference()) {
+            error(member.object->span, "cannot call consuming method `" + member.member + "` through a borrowed reference");
+        } else {
+            consumeValue(*member.object, object_type, "method receiver");
+        }
+    } else if (method->receiver == ast::ReceiverKind::Reference) {
+        if (!object_type.isReference()) (void)borrowPlace(*member.object, false, member.object->span);
+    } else if (method->receiver == ast::ReceiverKind::MutableReference) {
+        if (object_type.isReference()) {
+            if (!object_type.mutable_reference) {
+                error(member.object->span, "method `" + member.member + "` requires a mutable receiver");
+            }
+        } else {
+            const auto receiver = checkLValue(*member.object);
+            if (!receiver.is_mutable) {
+                error(member.object->span, "method `" + member.member + "` requires a mutable receiver");
+            } else {
+                (void)borrowPlace(*member.object, true, member.object->span);
+            }
+        }
     }
 
     const Type& signature = method->signature;
@@ -739,8 +865,13 @@ Type SemanticAnalyzer::checkMethodCall(const ast::CallExpr& expression, const as
             error(expression.arguments[i]->span,
                   "argument " + std::to_string(i + 1) + " of method `" + member.member +
                   "` expects `" + expected.name() + "`, found `" + actual.name() + "`");
+            continue;
         }
+        if (!expected.isReference()) consumeValue(*expression.arguments[i], actual, "method argument");
     }
+
+    persist_borrows_ = old_persistence;
+    endTemporaryBorrowFrame();
     return signature.return_type ? *signature.return_type : unitType();
 }
 
@@ -785,6 +916,10 @@ Type SemanticAnalyzer::checkArray(const ast::ArrayExpr& expression) {
         const Type value = checkExpr(*expression.repeat_value);
         const Type count = checkExpr(*expression.repeat_count);
         if (!count.isInteger()) error(expression.repeat_count->span, "array repeat count must be an integer");
+        if (!value.isCopy() && !value.isError()) {
+            error(expression.repeat_value->span,
+                  "array repetition requires a Copy value, found `" + value.name() + "`");
+        }
         return Type::array(value, repeatedArrayLength(*expression.repeat_count));
     }
 
@@ -805,6 +940,11 @@ Type SemanticAnalyzer::checkArray(const ast::ArrayExpr& expression) {
         }
         error(expression.elements[i]->span,
               "array element has type `" + current.name() + "`, expected `" + element.name() + "`");
+    }
+
+    for (const auto& item : expression.elements) {
+        const Type* item_type = typeOf(*item);
+        if (item_type) consumeValue(*item, *item_type, "array element");
     }
     return Type::array(element, expression.elements.size());
 }
@@ -851,6 +991,8 @@ Type SemanticAnalyzer::checkStructLiteral(const ast::StructLiteralExpr& expressi
             error(field.value->span,
                   "field `" + field.name + "` expects `" + expected->second.name() +
                   "`, found `" + actual.name() + "`");
+        } else if (field.value) {
+            consumeValue(*field.value, actual, "struct field initializer");
         }
     }
     for (const auto& [name, field_type] : info->fields) {
@@ -902,8 +1044,11 @@ Type SemanticAnalyzer::checkFor(const ast::ForExpr& expression) {
         error(expression.iterable->span, "value of type `" + iterable.name() + "` is not iterable");
     }
 
-    symbols_.pushScope();
+    consumeValue(*expression.iterable, iterable, "for-loop iterable");
+
+    pushScope();
     Symbol binding;
+    binding.id = next_symbol_id_++;
     binding.name = expression.binding;
     binding.kind = SymbolKind::Variable;
     binding.type = binding_type;
@@ -914,7 +1059,7 @@ Type SemanticAnalyzer::checkFor(const ast::ForExpr& expression) {
     ++loop_depth_;
     (void)checkBlock(*expression.body, false);
     --loop_depth_;
-    symbols_.popScope();
+    popScope();
     return unitType();
 }
 
@@ -966,10 +1111,24 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
         return LValueInfo{.type = symbol->type, .is_mutable = symbol->is_mutable};
     }
 
+    if (expression.kind == ast::ExprKind::Unary) {
+        const auto& unary = static_cast<const ast::UnaryExpr&>(expression);
+        if (unary.op == TokenKind::Star) {
+            const Type pointer = checkExpr(*unary.operand);
+            if (pointer.kind != TypeKind::Reference || !pointer.element) {
+                if (!pointer.isError()) error(expression.span, "cannot assign through non-reference type `" + pointer.name() + "`");
+                return {};
+            }
+            return LValueInfo{.type = *pointer.element, .is_mutable = pointer.mutable_reference};
+        }
+    }
+
     if (expression.kind == ast::ExprKind::Index) {
         const auto& index = static_cast<const ast::IndexExpr&>(expression);
+        const Type object_type = checkExpr(*index.object);
         const Type result = checkIndex(index);
         LValueInfo base = checkLValue(*index.object);
+        if (object_type.kind == TypeKind::Reference && object_type.mutable_reference) base.is_mutable = true;
         return LValueInfo{.type = result, .is_mutable = base.is_mutable};
     }
 
@@ -985,7 +1144,8 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
             }
             return {};
         }
-        const LValueInfo base = checkLValue(*member.object);
+        LValueInfo base = checkLValue(*member.object);
+        if (object_type.kind == TypeKind::Reference && object_type.mutable_reference) base.is_mutable = true;
         return LValueInfo{.type = *field, .is_mutable = base.is_mutable};
     }
 
@@ -993,9 +1153,159 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
     return {};
 }
 
+Symbol* SemanticAnalyzer::rootSymbol(const ast::Expr& expression) {
+    switch (expression.kind) {
+        case ast::ExprKind::Identifier: {
+            const auto& identifier = static_cast<const ast::IdentifierExpr&>(expression);
+            Symbol* symbol = symbols_.lookupMutable(identifier.name);
+            if (!symbol || symbol->kind == SymbolKind::Function || symbol->kind == SymbolKind::BuiltinFunction) return nullptr;
+            return symbol;
+        }
+        case ast::ExprKind::Member:
+            return rootSymbol(*static_cast<const ast::MemberExpr&>(expression).object);
+        case ast::ExprKind::Index:
+            return rootSymbol(*static_cast<const ast::IndexExpr&>(expression).object);
+        default:
+            return nullptr;
+    }
+}
+
+const Symbol* SemanticAnalyzer::rootSymbol(const ast::Expr& expression) const {
+    switch (expression.kind) {
+        case ast::ExprKind::Identifier: {
+            const auto& identifier = static_cast<const ast::IdentifierExpr&>(expression);
+            const Symbol* symbol = symbols_.lookup(identifier.name);
+            if (!symbol || symbol->kind == SymbolKind::Function || symbol->kind == SymbolKind::BuiltinFunction) return nullptr;
+            return symbol;
+        }
+        case ast::ExprKind::Member:
+            return rootSymbol(*static_cast<const ast::MemberExpr&>(expression).object);
+        case ast::ExprKind::Index:
+            return rootSymbol(*static_cast<const ast::IndexExpr&>(expression).object);
+        default:
+            return nullptr;
+    }
+}
+
+bool SemanticAnalyzer::borrowPlace(const ast::Expr& expression, bool is_mutable, SourceSpan span) {
+    const LValueInfo place = checkLValue(expression);
+    if (place.type.isError()) return false;
+    if (is_mutable && !place.is_mutable) {
+        error(span, "cannot mutably borrow an immutable value");
+        return false;
+    }
+
+    Symbol* root = rootSymbol(expression);
+    if (!root) {
+        // Reborrows through an existing reference are already constrained by the reference type.
+        return true;
+    }
+    if (root->is_moved) {
+        error(span, "cannot borrow moved value `" + root->name + "`");
+        return false;
+    }
+    if (is_mutable) {
+        if (root->mutable_borrowed || root->shared_borrows > 0) {
+            error(span, "cannot mutably borrow `" + root->name + "` because it is already borrowed");
+            return false;
+        }
+    } else if (root->mutable_borrowed) {
+        error(span, "cannot immutably borrow `" + root->name + "` while it is mutably borrowed");
+        return false;
+    }
+
+    registerBorrow(*root, is_mutable);
+    return true;
+}
+
+void SemanticAnalyzer::consumeValue(const ast::Expr& expression, const Type& type, std::string_view context) {
+    if (type.isError() || type.isCopy()) return;
+
+    if (expression.kind == ast::ExprKind::Unary) {
+        const auto& unary = static_cast<const ast::UnaryExpr&>(expression);
+        if (unary.op == TokenKind::Star) {
+            error(expression.span, "cannot move out of borrowed content in " + std::string(context));
+            return;
+        }
+    }
+
+    Symbol* root = rootSymbol(expression);
+    if (!root) return; // Temporary/rvalue: ownership is already local to the expression.
+
+    if (root->is_moved) return; // The read path already emitted the primary diagnostic.
+    if (root->mutable_borrowed || root->shared_borrows > 0) {
+        error(expression.span, "cannot move `" + root->name + "` while it is borrowed");
+        return;
+    }
+    root->is_moved = true;
+}
+
+void SemanticAnalyzer::reinitializeIfDirectIdentifier(const ast::Expr& expression) {
+    if (expression.kind != ast::ExprKind::Identifier) return;
+    const auto& identifier = static_cast<const ast::IdentifierExpr&>(expression);
+    if (Symbol* symbol = symbols_.lookupMutable(identifier.name)) symbol->is_moved = false;
+}
+
+void SemanticAnalyzer::pushScope() {
+    symbols_.pushScope();
+    borrow_scopes_.emplace_back();
+}
+
+void SemanticAnalyzer::popScope() {
+    if (!borrow_scopes_.empty()) {
+        for (auto it = borrow_scopes_.back().rbegin(); it != borrow_scopes_.back().rend(); ++it) {
+            releaseBorrow(*it);
+        }
+        borrow_scopes_.pop_back();
+    }
+    symbols_.popScope();
+}
+
+void SemanticAnalyzer::beginTemporaryBorrowFrame() {
+    temporary_borrow_frames_.emplace_back();
+}
+
+void SemanticAnalyzer::endTemporaryBorrowFrame() {
+    if (temporary_borrow_frames_.empty()) return;
+    for (auto it = temporary_borrow_frames_.back().rbegin(); it != temporary_borrow_frames_.back().rend(); ++it) {
+        releaseBorrow(*it);
+    }
+    temporary_borrow_frames_.pop_back();
+}
+
+void SemanticAnalyzer::releaseBorrow(const BorrowRecord& borrow) {
+    Symbol* symbol = symbols_.lookupById(borrow.symbol_id);
+    if (!symbol) return;
+    if (borrow.is_mutable) {
+        symbol->mutable_borrowed = false;
+    } else if (symbol->shared_borrows > 0) {
+        --symbol->shared_borrows;
+    }
+}
+
+void SemanticAnalyzer::registerBorrow(Symbol& symbol, bool is_mutable) {
+    if (is_mutable) symbol.mutable_borrowed = true;
+    else ++symbol.shared_borrows;
+
+    BorrowRecord record{.symbol_id = symbol.id, .is_mutable = is_mutable};
+    if (persist_borrows_) {
+        if (borrow_scopes_.empty()) borrow_scopes_.emplace_back();
+        borrow_scopes_.back().push_back(record);
+    } else {
+        if (temporary_borrow_frames_.empty()) temporary_borrow_frames_.emplace_back();
+        temporary_borrow_frames_.back().push_back(record);
+    }
+}
+
 bool SemanticAnalyzer::compatible(const Type& expected, const Type& actual, const ast::Expr* value) const {
     if (expected.isError() || actual.isError()) return true;
     if (expected == actual) return true;
+
+    if (expected.kind == TypeKind::Reference && actual.kind == TypeKind::Reference &&
+        !expected.mutable_reference && actual.mutable_reference && expected.element && actual.element &&
+        *expected.element == *actual.element) {
+        return true;
+    }
 
     if (value && isLiteralOfKind(value, TokenKind::IntegerLiteral) && expected.isInteger() && actual.isInteger()) {
         return true;

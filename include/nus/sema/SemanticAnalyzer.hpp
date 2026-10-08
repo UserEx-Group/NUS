@@ -5,8 +5,10 @@
 #include "nus/sema/SymbolTable.hpp"
 #include "nus/sema/Type.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -38,6 +40,11 @@ private:
         const ast::StructDecl* declaration{nullptr};
         std::unordered_map<std::string, Type> fields;
         std::unordered_map<std::string, MethodInfo> methods;
+    };
+
+    struct BorrowRecord {
+        std::size_t symbol_id{0};
+        bool is_mutable{false};
     };
 
     void reset();
@@ -76,6 +83,19 @@ private:
     [[nodiscard]] static Type dereferenceForMember(Type type);
 
     [[nodiscard]] LValueInfo checkLValue(const ast::Expr& expression);
+    [[nodiscard]] Symbol* rootSymbol(const ast::Expr& expression);
+    [[nodiscard]] const Symbol* rootSymbol(const ast::Expr& expression) const;
+    [[nodiscard]] bool borrowPlace(const ast::Expr& expression, bool is_mutable, SourceSpan span);
+    void consumeValue(const ast::Expr& expression, const Type& type, std::string_view context);
+    void reinitializeIfDirectIdentifier(const ast::Expr& expression);
+
+    void pushScope();
+    void popScope();
+    void beginTemporaryBorrowFrame();
+    void endTemporaryBorrowFrame();
+    void releaseBorrow(const BorrowRecord& borrow);
+    void registerBorrow(Symbol& symbol, bool is_mutable);
+
     [[nodiscard]] bool compatible(const Type& expected, const Type& actual, const ast::Expr* value = nullptr) const;
     [[nodiscard]] bool requireBool(const ast::Expr& expression, std::string_view context);
     [[nodiscard]] bool requireInteger(const ast::Expr& expression, std::string_view context);
@@ -98,6 +118,11 @@ private:
     std::unordered_map<std::string, StructInfo> structs_;
     Type current_return_type_{Type::simple(TypeKind::Unit)};
     int loop_depth_{0};
+
+    std::size_t next_symbol_id_{1};
+    std::vector<std::vector<BorrowRecord>> borrow_scopes_;
+    std::vector<std::vector<BorrowRecord>> temporary_borrow_frames_;
+    bool persist_borrows_{false};
 };
 
 } // namespace nus::sema
