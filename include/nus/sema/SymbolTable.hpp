@@ -18,7 +18,10 @@ public:
 
     [[nodiscard]] bool declare(Symbol symbol);
     [[nodiscard]] const Symbol* lookup(std::string_view name) const;
+    [[nodiscard]] Symbol* lookupMutable(std::string_view name);
     [[nodiscard]] const Symbol* lookupCurrent(std::string_view name) const;
+    [[nodiscard]] Symbol* lookupById(std::size_t id);
+    [[nodiscard]] const Symbol* lookupById(std::size_t id) const;
     [[nodiscard]] std::size_t depth() const noexcept;
 
 private:
