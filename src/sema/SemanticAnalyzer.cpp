@@ -141,6 +141,7 @@ void SemanticAnalyzer::reset() {
     diagnostics_.clear();
     expression_types_.clear();
     function_signatures_.clear();
+    structs_.clear();
     current_return_type_ = unitType();
     loop_depth_ = 0;
 }
@@ -148,8 +149,15 @@ void SemanticAnalyzer::reset() {
 void SemanticAnalyzer::analyze(const ast::SourceFile& file) {
     reset();
     registerBuiltins();
+    collectStructNames(file);
+    collectStructFields(file);
     collectFunctions(file);
+    collectMethods(file);
     for (const auto& function : file.functions) analyzeFunction(function);
+    for (const auto& implementation : file.impls) {
+        const auto target_name = implementation.target.name();
+        for (const auto& method : implementation.methods) analyzeMethod(target_name, method);
+    }
 }
 
 const std::vector<Diagnostic>& SemanticAnalyzer::diagnostics() const noexcept {
@@ -179,6 +187,37 @@ void SemanticAnalyzer::registerBuiltins() {
     (void)symbols_.declare(std::move(assert_symbol));
 }
 
+void SemanticAnalyzer::collectStructNames(const ast::SourceFile& file) {
+    for (const auto& structure : file.structs) {
+        if (simpleTypeKind(structure.name)) {
+            error(structure.span, "struct name `" + structure.name + "` conflicts with a built-in type");
+            continue;
+        }
+        if (structs_.contains(structure.name)) {
+            error(structure.span, "duplicate struct `" + structure.name + "`");
+            continue;
+        }
+        StructInfo info;
+        info.declaration = &structure;
+        structs_.emplace(structure.name, std::move(info));
+    }
+}
+
+void SemanticAnalyzer::collectStructFields(const ast::SourceFile& file) {
+    for (const auto& structure : file.structs) {
+        auto found = structs_.find(structure.name);
+        if (found == structs_.end() || found->second.declaration != &structure) continue;
+        auto& info = found->second;
+        for (const auto& field : structure.fields) {
+            if (info.fields.contains(field.name)) {
+                error(field.span, "duplicate field `" + field.name + "` in struct `" + structure.name + "`");
+                continue;
+            }
+            info.fields.emplace(field.name, resolveType(field.type));
+        }
+    }
+}
+
 void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
     for (const auto& function : file.functions) {
         std::vector<Type> parameters;
@@ -194,6 +233,39 @@ void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
         symbol.span = function.span;
         if (!symbols_.declare(std::move(symbol))) {
             error(function.span, "duplicate function `" + function.name + "`");
+        }
+    }
+}
+
+void SemanticAnalyzer::collectMethods(const ast::SourceFile& file) {
+    for (const auto& implementation : file.impls) {
+        const auto target_name = implementation.target.name();
+        auto struct_it = structs_.find(target_name);
+        if (struct_it == structs_.end()) {
+            error(implementation.target.span, "cannot implement unknown struct `" + target_name + "`");
+            continue;
+        }
+
+        for (const auto& method : implementation.methods) {
+            if (method.receiver == ast::ReceiverKind::None) {
+                error(method.span, "method `" + method.name + "` must declare a `self` receiver");
+            }
+            if (struct_it->second.fields.contains(method.name) || struct_it->second.methods.contains(method.name)) {
+                error(method.span, "duplicate member `" + method.name + "` in struct `" + target_name + "`");
+                continue;
+            }
+
+            std::vector<Type> parameters;
+            parameters.reserve(method.parameters.size());
+            for (const auto& parameter : method.parameters) parameters.push_back(resolveType(parameter.type));
+            const Type result = method.return_type ? resolveType(*method.return_type) : unitType();
+            Type signature = Type::function(std::move(parameters), result);
+            function_signatures_.insert_or_assign(&method, signature);
+            struct_it->second.methods.emplace(method.name, MethodInfo{
+                .declaration = &method,
+                .receiver = method.receiver,
+                .signature = std::move(signature),
+            });
         }
     }
 }
@@ -230,9 +302,59 @@ void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
     symbols_.popScope();
 }
 
+void SemanticAnalyzer::analyzeMethod(const std::string& target_name, const ast::FunctionDecl& method) {
+    const auto signature_it = function_signatures_.find(&method);
+    const Type signature = signature_it != function_signatures_.end()
+                               ? signature_it->second
+                               : Type::function({}, unitType());
+    current_return_type_ = signature.return_type ? *signature.return_type : unitType();
+    loop_depth_ = 0;
+    symbols_.pushScope();
+
+    if (method.receiver != ast::ReceiverKind::None) {
+        Type self_type = Type::structure(target_name);
+        bool self_mutable = false;
+        if (method.receiver == ast::ReceiverKind::Reference) self_type = Type::reference(self_type, false);
+        if (method.receiver == ast::ReceiverKind::MutableReference) {
+            self_type = Type::reference(self_type, true);
+            self_mutable = true;
+        }
+        Symbol self_symbol;
+        self_symbol.name = "self";
+        self_symbol.kind = SymbolKind::Parameter;
+        self_symbol.type = std::move(self_type);
+        self_symbol.is_mutable = self_mutable;
+        self_symbol.span = method.receiver_span;
+        (void)symbols_.declare(std::move(self_symbol));
+    }
+
+    for (std::size_t index = 0; index < method.parameters.size(); ++index) {
+        const auto& parameter = method.parameters[index];
+        Symbol symbol;
+        symbol.name = parameter.name;
+        symbol.kind = SymbolKind::Parameter;
+        symbol.type = index < signature.parameters.size() ? signature.parameters[index] : errorType();
+        symbol.is_mutable = false;
+        symbol.span = parameter.span;
+        if (!symbols_.declare(std::move(symbol))) {
+            error(parameter.span, "duplicate parameter `" + parameter.name + "`");
+        }
+    }
+
+    const Type body_type = checkBlock(*method.body, false);
+    if (method.body->tail_expression && !compatible(current_return_type_, body_type, method.body->tail_expression.get())) {
+        error(method.body->tail_expression->span,
+              "method `" + method.name + "` returns `" + body_type.name() +
+              "` but `" + current_return_type_.name() + "` is required");
+    }
+
+    symbols_.popScope();
+}
+
 Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
     const auto name = type_ref.name();
     if (const auto kind = simpleTypeKind(name)) return Type::simple(*kind);
+    if (structs_.contains(name)) return Type::structure(name);
     error(type_ref.span, "unknown type `" + name + "`");
     return errorType();
 }
@@ -348,6 +470,9 @@ Type SemanticAnalyzer::checkExpr(const ast::Expr& expression) {
             break;
         case ast::ExprKind::Range:
             result = checkRange(static_cast<const ast::RangeExpr&>(expression));
+            break;
+        case ast::ExprKind::StructLiteral:
+            result = checkStructLiteral(static_cast<const ast::StructLiteralExpr&>(expression));
             break;
         case ast::ExprKind::Block:
             result = checkBlock(static_cast<const ast::BlockExpr&>(expression));
@@ -548,6 +673,10 @@ Type SemanticAnalyzer::checkAssignment(const ast::AssignmentExpr& expression) {
 }
 
 Type SemanticAnalyzer::checkCall(const ast::CallExpr& expression) {
+    if (expression.callee->kind == ast::ExprKind::Member) {
+        return checkMethodCall(expression, static_cast<const ast::MemberExpr&>(*expression.callee));
+    }
+
     const Type callee = checkExpr(*expression.callee);
     if (callee.kind != TypeKind::Function) {
         for (const auto& argument : expression.arguments) (void)checkExpr(*argument);
@@ -575,10 +704,53 @@ Type SemanticAnalyzer::checkCall(const ast::CallExpr& expression) {
     return callee.return_type ? *callee.return_type : unitType();
 }
 
+Type SemanticAnalyzer::checkMethodCall(const ast::CallExpr& expression, const ast::MemberExpr& member) {
+    const Type object_type = checkExpr(*member.object);
+    const MethodInfo* method = findMethod(object_type, member.member);
+    if (!method) {
+        if (findField(object_type, member.member)) {
+            const Type field = checkMember(member);
+            for (const auto& argument : expression.arguments) (void)checkExpr(*argument);
+            error(member.span, "field `" + member.member + "` of type `" + field.name() + "` is not callable");
+        } else if (!object_type.isError()) {
+            error(member.span, "type `" + dereferenceForMember(object_type).name() + "` has no method `" + member.member + "`");
+            for (const auto& argument : expression.arguments) (void)checkExpr(*argument);
+        }
+        return errorType();
+    }
+
+    recordType(member, method->signature);
+    if (method->receiver == ast::ReceiverKind::MutableReference) {
+        const auto receiver = checkLValue(*member.object);
+        if (!receiver.is_mutable) error(member.object->span, "method `" + member.member + "` requires a mutable receiver");
+    }
+
+    const Type& signature = method->signature;
+    if (expression.arguments.size() != signature.parameters.size()) {
+        error(expression.span,
+              "method `" + member.member + "` expects " + std::to_string(signature.parameters.size()) +
+              " argument(s), found " + std::to_string(expression.arguments.size()));
+    }
+    for (std::size_t i = 0; i < expression.arguments.size(); ++i) {
+        const Type actual = checkExpr(*expression.arguments[i]);
+        if (i >= signature.parameters.size()) continue;
+        const Type& expected = signature.parameters[i];
+        if (!compatible(expected, actual, expression.arguments[i].get())) {
+            error(expression.arguments[i]->span,
+                  "argument " + std::to_string(i + 1) + " of method `" + member.member +
+                  "` expects `" + expected.name() + "`, found `" + actual.name() + "`");
+        }
+    }
+    return signature.return_type ? *signature.return_type : unitType();
+}
+
 Type SemanticAnalyzer::checkMember(const ast::MemberExpr& expression) {
-    (void)checkExpr(*expression.object);
-    error(expression.span,
-          "member access `." + expression.member + "` requires struct/type metadata, which is not implemented yet");
+    const Type object = checkExpr(*expression.object);
+    if (const Type* field = findField(object, expression.member)) return *field;
+    if (const MethodInfo* method = findMethod(object, expression.member)) return method->signature;
+    if (!object.isError()) {
+        error(expression.span, "type `" + dereferenceForMember(object).name() + "` has no member `" + expression.member + "`");
+    }
     return errorType();
 }
 
@@ -650,6 +822,44 @@ Type SemanticAnalyzer::checkRange(const ast::RangeExpr& expression) {
     return Type::range(start_result ? start : end);
 }
 
+Type SemanticAnalyzer::checkStructLiteral(const ast::StructLiteralExpr& expression) {
+    const Type type = resolveType(expression.type);
+    if (!type.isStruct()) {
+        if (!type.isError()) error(expression.span, "`" + expression.type.name() + "` is not a struct type");
+        for (const auto& field : expression.fields) if (field.value) (void)checkExpr(*field.value);
+        return errorType();
+    }
+
+    const auto* info = findStruct(type);
+    if (!info) return errorType();
+    std::unordered_map<std::string, bool> seen;
+    for (const auto& field : expression.fields) {
+        if (seen.contains(field.name)) {
+            error(field.span, "duplicate initializer for field `" + field.name + "`");
+            if (field.value) (void)checkExpr(*field.value);
+            continue;
+        }
+        seen.emplace(field.name, true);
+        const auto expected = info->fields.find(field.name);
+        if (expected == info->fields.end()) {
+            error(field.span, "struct `" + type.name() + "` has no field `" + field.name + "`");
+            if (field.value) (void)checkExpr(*field.value);
+            continue;
+        }
+        const Type actual = field.value ? checkExpr(*field.value) : errorType();
+        if (field.value && !compatible(expected->second, actual, field.value.get())) {
+            error(field.value->span,
+                  "field `" + field.name + "` expects `" + expected->second.name() +
+                  "`, found `" + actual.name() + "`");
+        }
+    }
+    for (const auto& [name, field_type] : info->fields) {
+        (void)field_type;
+        if (!seen.contains(name)) error(expression.span, "missing initializer for field `" + name + "`");
+    }
+    return type;
+}
+
 Type SemanticAnalyzer::checkIf(const ast::IfExpr& expression) {
     (void)requireBool(*expression.condition, "if condition");
     const Type then_type = checkBlock(*expression.then_branch);
@@ -708,6 +918,39 @@ Type SemanticAnalyzer::checkFor(const ast::ForExpr& expression) {
     return unitType();
 }
 
+Type SemanticAnalyzer::dereferenceForMember(Type type) {
+    while (type.kind == TypeKind::Reference && type.element) type = *type.element;
+    return type;
+}
+
+const SemanticAnalyzer::StructInfo* SemanticAnalyzer::findStruct(const Type& type) const {
+    const Type base = dereferenceForMember(type);
+    if (!base.isStruct()) return nullptr;
+    const auto it = structs_.find(base.nominal_name);
+    return it == structs_.end() ? nullptr : &it->second;
+}
+
+SemanticAnalyzer::StructInfo* SemanticAnalyzer::findStruct(const Type& type) {
+    const Type base = dereferenceForMember(type);
+    if (!base.isStruct()) return nullptr;
+    const auto it = structs_.find(base.nominal_name);
+    return it == structs_.end() ? nullptr : &it->second;
+}
+
+const SemanticAnalyzer::MethodInfo* SemanticAnalyzer::findMethod(const Type& type, std::string_view name) const {
+    const auto* info = findStruct(type);
+    if (!info) return nullptr;
+    const auto it = info->methods.find(std::string(name));
+    return it == info->methods.end() ? nullptr : &it->second;
+}
+
+const Type* SemanticAnalyzer::findField(const Type& type, std::string_view name) const {
+    const auto* info = findStruct(type);
+    if (!info) return nullptr;
+    const auto it = info->fields.find(std::string(name));
+    return it == info->fields.end() ? nullptr : &it->second;
+}
+
 SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expression) {
     if (expression.kind == ast::ExprKind::Identifier) {
         const auto& identifier = static_cast<const ast::IdentifierExpr&>(expression);
@@ -731,8 +974,19 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
     }
 
     if (expression.kind == ast::ExprKind::Member) {
-        (void)checkMember(static_cast<const ast::MemberExpr&>(expression));
-        return {};
+        const auto& member = static_cast<const ast::MemberExpr&>(expression);
+        const Type object_type = checkExpr(*member.object);
+        const Type* field = findField(object_type, member.member);
+        if (!field) {
+            if (findMethod(object_type, member.member)) {
+                error(expression.span, "method `" + member.member + "` is not assignable");
+            } else if (!object_type.isError()) {
+                error(expression.span, "type `" + dereferenceForMember(object_type).name() + "` has no field `" + member.member + "`");
+            }
+            return {};
+        }
+        const LValueInfo base = checkLValue(*member.object);
+        return LValueInfo{.type = *field, .is_mutable = base.is_mutable};
     }
 
     error(expression.span, "expression is not assignable");

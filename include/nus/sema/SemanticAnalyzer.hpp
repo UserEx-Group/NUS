@@ -6,6 +6,7 @@
 #include "nus/sema/Type.hpp"
 
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -27,10 +28,26 @@ private:
         bool is_mutable{false};
     };
 
+    struct MethodInfo {
+        const ast::FunctionDecl* declaration{nullptr};
+        ast::ReceiverKind receiver{ast::ReceiverKind::None};
+        Type signature{Type::simple(TypeKind::Error)};
+    };
+
+    struct StructInfo {
+        const ast::StructDecl* declaration{nullptr};
+        std::unordered_map<std::string, Type> fields;
+        std::unordered_map<std::string, MethodInfo> methods;
+    };
+
     void reset();
     void registerBuiltins();
+    void collectStructNames(const ast::SourceFile& file);
+    void collectStructFields(const ast::SourceFile& file);
     void collectFunctions(const ast::SourceFile& file);
+    void collectMethods(const ast::SourceFile& file);
     void analyzeFunction(const ast::FunctionDecl& function);
+    void analyzeMethod(const std::string& target_name, const ast::FunctionDecl& method);
 
     [[nodiscard]] Type resolveType(const ast::TypeRef& type_ref);
     [[nodiscard]] Type checkBlock(const ast::BlockExpr& block, bool create_scope = true);
@@ -41,14 +58,22 @@ private:
     [[nodiscard]] Type checkBinary(const ast::BinaryExpr& expression);
     [[nodiscard]] Type checkAssignment(const ast::AssignmentExpr& expression);
     [[nodiscard]] Type checkCall(const ast::CallExpr& expression);
+    [[nodiscard]] Type checkMethodCall(const ast::CallExpr& expression, const ast::MemberExpr& member);
     [[nodiscard]] Type checkMember(const ast::MemberExpr& expression);
     [[nodiscard]] Type checkIndex(const ast::IndexExpr& expression);
     [[nodiscard]] Type checkArray(const ast::ArrayExpr& expression);
     [[nodiscard]] Type checkRange(const ast::RangeExpr& expression);
+    [[nodiscard]] Type checkStructLiteral(const ast::StructLiteralExpr& expression);
     [[nodiscard]] Type checkIf(const ast::IfExpr& expression);
     [[nodiscard]] Type checkWhile(const ast::WhileExpr& expression);
     [[nodiscard]] Type checkLoop(const ast::LoopExpr& expression);
     [[nodiscard]] Type checkFor(const ast::ForExpr& expression);
+
+    [[nodiscard]] const StructInfo* findStruct(const Type& type) const;
+    [[nodiscard]] StructInfo* findStruct(const Type& type);
+    [[nodiscard]] const MethodInfo* findMethod(const Type& type, std::string_view name) const;
+    [[nodiscard]] const Type* findField(const Type& type, std::string_view name) const;
+    [[nodiscard]] static Type dereferenceForMember(Type type);
 
     [[nodiscard]] LValueInfo checkLValue(const ast::Expr& expression);
     [[nodiscard]] bool compatible(const Type& expected, const Type& actual, const ast::Expr* value = nullptr) const;
@@ -70,6 +95,7 @@ private:
     std::vector<Diagnostic> diagnostics_;
     std::unordered_map<const ast::Expr*, Type> expression_types_;
     std::unordered_map<const ast::FunctionDecl*, Type> function_signatures_;
+    std::unordered_map<std::string, StructInfo> structs_;
     Type current_return_type_{Type::simple(TypeKind::Unit)};
     int loop_depth_{0};
 };
