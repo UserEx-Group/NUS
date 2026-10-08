@@ -59,6 +59,15 @@ void AstPrinter::printStatement(const Stmt& statement, std::string& out, int dep
             if (ret.value) printExpression(*ret.value, out, depth + 1);
             break;
         }
+        case StmtKind::Break: {
+            const auto& brk = static_cast<const BreakStmt&>(statement);
+            line(out, depth, "Break");
+            if (brk.value) printExpression(*brk.value, out, depth + 1);
+            break;
+        }
+        case StmtKind::Continue:
+            line(out, depth, "Continue");
+            break;
         case StmtKind::Expression: {
             const auto& expr = static_cast<const ExprStmt&>(statement);
             line(out, depth, expr.has_semicolon ? "ExpressionStmt" : "ExpressionStmt(no-semicolon)");
@@ -93,6 +102,15 @@ void AstPrinter::printExpression(const Expr& expression, std::string& out, int d
             printExpression(*binary.right, out, depth + 1);
             break;
         }
+        case ExprKind::Assignment: {
+            const auto& assignment = static_cast<const AssignmentExpr&>(expression);
+            line(out, depth, "Assignment " + std::string(tokenKindName(assignment.op)));
+            line(out, depth + 1, "Target");
+            printExpression(*assignment.target, out, depth + 2);
+            line(out, depth + 1, "Value");
+            printExpression(*assignment.value, out, depth + 2);
+            break;
+        }
         case ExprKind::Call: {
             const auto& call = static_cast<const CallExpr&>(expression);
             line(out, depth, "Call");
@@ -102,6 +120,46 @@ void AstPrinter::printExpression(const Expr& expression, std::string& out, int d
                 line(out, depth + 1, "Argument");
                 printExpression(*argument, out, depth + 2);
             }
+            break;
+        }
+        case ExprKind::Member: {
+            const auto& member = static_cast<const MemberExpr&>(expression);
+            line(out, depth, "Member ." + member.member);
+            printExpression(*member.object, out, depth + 1);
+            break;
+        }
+        case ExprKind::Index: {
+            const auto& index = static_cast<const IndexExpr&>(expression);
+            line(out, depth, "Index");
+            line(out, depth + 1, "Object");
+            printExpression(*index.object, out, depth + 2);
+            line(out, depth + 1, "Subscript");
+            printExpression(*index.index, out, depth + 2);
+            break;
+        }
+        case ExprKind::Array: {
+            const auto& array = static_cast<const ArrayExpr&>(expression);
+            line(out, depth, array.isRepeated() ? "ArrayRepeat" : "Array");
+            if (array.isRepeated()) {
+                line(out, depth + 1, "Value");
+                printExpression(*array.repeat_value, out, depth + 2);
+                line(out, depth + 1, "Count");
+                printExpression(*array.repeat_count, out, depth + 2);
+            } else {
+                for (const auto& element : array.elements) {
+                    line(out, depth + 1, "Element");
+                    printExpression(*element, out, depth + 2);
+                }
+            }
+            break;
+        }
+        case ExprKind::Range: {
+            const auto& range = static_cast<const RangeExpr&>(expression);
+            line(out, depth, range.inclusive ? "RangeInclusive" : "Range");
+            line(out, depth + 1, "Start");
+            printExpression(*range.start, out, depth + 2);
+            line(out, depth + 1, "End");
+            printExpression(*range.end, out, depth + 2);
             break;
         }
         case ExprKind::Block:
@@ -118,6 +176,30 @@ void AstPrinter::printExpression(const Expr& expression, std::string& out, int d
                 line(out, depth + 1, "Else");
                 printExpression(*if_expr.else_branch, out, depth + 2);
             }
+            break;
+        }
+        case ExprKind::While: {
+            const auto& while_expr = static_cast<const WhileExpr&>(expression);
+            line(out, depth, "While");
+            line(out, depth + 1, "Condition");
+            printExpression(*while_expr.condition, out, depth + 2);
+            line(out, depth + 1, "Body");
+            printBlock(*while_expr.body, out, depth + 2);
+            break;
+        }
+        case ExprKind::Loop: {
+            const auto& loop_expr = static_cast<const LoopExpr&>(expression);
+            line(out, depth, "Loop");
+            printBlock(*loop_expr.body, out, depth + 1);
+            break;
+        }
+        case ExprKind::For: {
+            const auto& for_expr = static_cast<const ForExpr&>(expression);
+            line(out, depth, "For " + for_expr.binding);
+            line(out, depth + 1, "Iterable");
+            printExpression(*for_expr.iterable, out, depth + 2);
+            line(out, depth + 1, "Body");
+            printBlock(*for_expr.body, out, depth + 2);
             break;
         }
     }

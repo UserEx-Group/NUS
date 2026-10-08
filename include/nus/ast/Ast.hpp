@@ -41,9 +41,17 @@ enum class ExprKind {
     Identifier,
     Unary,
     Binary,
+    Assignment,
     Call,
+    Member,
+    Index,
+    Array,
+    Range,
     Block,
     If,
+    While,
+    Loop,
+    For,
 };
 
 struct Expr : Node {
@@ -83,6 +91,15 @@ struct BinaryExpr final : Expr {
     ExprPtr right;
 };
 
+struct AssignmentExpr final : Expr {
+    AssignmentExpr(TokenKind op, ExprPtr target, ExprPtr value)
+        : Expr(ExprKind::Assignment), op(op), target(std::move(target)), value(std::move(value)) {}
+
+    TokenKind op;
+    ExprPtr target;
+    ExprPtr value;
+};
+
 struct CallExpr final : Expr {
     explicit CallExpr(ExprPtr callee)
         : Expr(ExprKind::Call), callee(std::move(callee)) {}
@@ -91,9 +108,48 @@ struct CallExpr final : Expr {
     std::vector<ExprPtr> arguments;
 };
 
+struct MemberExpr final : Expr {
+    MemberExpr(ExprPtr object, std::string member)
+        : Expr(ExprKind::Member), object(std::move(object)), member(std::move(member)) {}
+
+    ExprPtr object;
+    std::string member;
+};
+
+struct IndexExpr final : Expr {
+    IndexExpr(ExprPtr object, ExprPtr index)
+        : Expr(ExprKind::Index), object(std::move(object)), index(std::move(index)) {}
+
+    ExprPtr object;
+    ExprPtr index;
+};
+
+struct ArrayExpr final : Expr {
+    ArrayExpr() : Expr(ExprKind::Array) {}
+
+    std::vector<ExprPtr> elements;
+    ExprPtr repeat_value;
+    ExprPtr repeat_count;
+
+    [[nodiscard]] bool isRepeated() const noexcept {
+        return repeat_value != nullptr;
+    }
+};
+
+struct RangeExpr final : Expr {
+    RangeExpr(ExprPtr start, ExprPtr end, bool inclusive)
+        : Expr(ExprKind::Range), start(std::move(start)), end(std::move(end)), inclusive(inclusive) {}
+
+    ExprPtr start;
+    ExprPtr end;
+    bool inclusive{false};
+};
+
 enum class StmtKind {
     Let,
     Return,
+    Break,
+    Continue,
     Expression,
 };
 
@@ -116,6 +172,15 @@ struct ReturnStmt final : Stmt {
     ExprPtr value;
 };
 
+struct BreakStmt final : Stmt {
+    BreakStmt() : Stmt(StmtKind::Break) {}
+    ExprPtr value;
+};
+
+struct ContinueStmt final : Stmt {
+    ContinueStmt() : Stmt(StmtKind::Continue) {}
+};
+
 struct ExprStmt final : Stmt {
     ExprStmt() : Stmt(StmtKind::Expression) {}
     ExprPtr expression;
@@ -135,6 +200,27 @@ struct IfExpr final : Expr {
     ExprPtr condition;
     std::unique_ptr<BlockExpr> then_branch;
     ExprPtr else_branch;
+};
+
+struct WhileExpr final : Expr {
+    WhileExpr() : Expr(ExprKind::While) {}
+
+    ExprPtr condition;
+    std::unique_ptr<BlockExpr> body;
+};
+
+struct LoopExpr final : Expr {
+    LoopExpr() : Expr(ExprKind::Loop) {}
+
+    std::unique_ptr<BlockExpr> body;
+};
+
+struct ForExpr final : Expr {
+    ForExpr() : Expr(ExprKind::For) {}
+
+    std::string binding;
+    ExprPtr iterable;
+    std::unique_ptr<BlockExpr> body;
 };
 
 struct Parameter : Node {
