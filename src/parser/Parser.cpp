@@ -245,18 +245,25 @@ ast::Parameter Parser::parseParameter() {
 
 ast::TypeRef Parser::parseType() {
     ast::TypeRef type;
+    SourceSpan start{};
+
+    if (match(TokenKind::Ampersand)) {
+        start = previous().span;
+        type.is_reference = true;
+        type.is_mutable_reference = match(TokenKind::KwMut);
+    }
 
     if (match(TokenKind::LeftParen)) {
-        const auto start = previous().span;
+        const auto unit_start = previous().span;
         const auto end = expect(TokenKind::RightParen, "expected `)` for unit type").span;
         type.path.push_back("()");
-        type.span = spanFrom(start, end);
+        type.span = type.is_reference ? spanFrom(start, end) : spanFrom(unit_start, end);
         return type;
     }
 
     const auto& first = expect(TokenKind::Identifier, "expected type name");
     type.path.push_back(tokenText(first));
-    type.span = first.span;
+    type.span = type.is_reference ? spanFrom(start, first.span) : first.span;
 
     while (match(TokenKind::ColonColon)) {
         const auto& part = expect(TokenKind::Identifier, "expected type path segment after `::`");
@@ -455,12 +462,13 @@ ast::ExprPtr Parser::parsePrefix() {
 
     if (isUnaryOperator(current().kind)) {
         const auto op = advance();
+        const bool mutable_borrow = op.kind == TokenKind::Ampersand && match(TokenKind::KwMut);
         auto operand = parseExpression(13);
         if (!operand) {
             errorAt(current(), "expected operand after unary operator");
             return nullptr;
         }
-        auto unary = std::make_unique<ast::UnaryExpr>(op.kind, std::move(operand));
+        auto unary = std::make_unique<ast::UnaryExpr>(op.kind, std::move(operand), mutable_borrow);
         unary->span = spanFrom(op.span, unary->operand->span);
         return unary;
     }
@@ -791,9 +799,15 @@ bool Parser::isUnaryOperator(TokenKind kind) noexcept {
 }
 
 bool Parser::isAssignable(const ast::Expr& expression) noexcept {
-    return expression.kind == ast::ExprKind::Identifier ||
-           expression.kind == ast::ExprKind::Member ||
-           expression.kind == ast::ExprKind::Index;
+    if (expression.kind == ast::ExprKind::Identifier ||
+        expression.kind == ast::ExprKind::Member ||
+        expression.kind == ast::ExprKind::Index) {
+        return true;
+    }
+    if (expression.kind == ast::ExprKind::Unary) {
+        return static_cast<const ast::UnaryExpr&>(expression).op == TokenKind::Star;
+    }
+    return false;
 }
 
 bool Parser::isBlockLike(const ast::Expr& expression) noexcept {

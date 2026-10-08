@@ -25,12 +25,17 @@ struct Node {
 
 struct TypeRef : Node {
     std::vector<std::string> path;
+    bool is_reference{false};
+    bool is_mutable_reference{false};
 
     [[nodiscard]] std::string name() const {
         std::string result;
         for (std::size_t i = 0; i < path.size(); ++i) {
             if (i != 0) result += "::";
             result += path[i];
+        }
+        if (is_reference) {
+            return std::string("&") + (is_mutable_reference ? "mut " : "") + result;
         }
         return result;
     }
@@ -74,10 +79,11 @@ struct IdentifierExpr final : Expr {
 };
 
 struct UnaryExpr final : Expr {
-    UnaryExpr(TokenKind op, ExprPtr operand)
-        : Expr(ExprKind::Unary), op(op), operand(std::move(operand)) {}
+    UnaryExpr(TokenKind op, ExprPtr operand, bool mutable_borrow = false)
+        : Expr(ExprKind::Unary), op(op), operand(std::move(operand)), mutable_borrow(mutable_borrow) {}
     TokenKind op;
     ExprPtr operand;
+    bool mutable_borrow{false};
 };
 
 struct BinaryExpr final : Expr {

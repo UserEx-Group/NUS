@@ -103,7 +103,11 @@ void AstPrinter::printExpression(const Expr& expression, std::string& out, int d
         }
         case ExprKind::Unary: {
             const auto& unary = static_cast<const UnaryExpr&>(expression);
-            line(out, depth, "Unary " + std::string(tokenKindName(unary.op)));
+            if (unary.op == TokenKind::Ampersand) {
+                line(out, depth, unary.mutable_borrow ? "Borrow &mut" : "Borrow &");
+            } else {
+                line(out, depth, "Unary " + std::string(tokenKindName(unary.op)));
+            }
             printExpression(*unary.operand, out, depth + 1);
             break;
         }
