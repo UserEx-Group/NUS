@@ -434,6 +434,273 @@ void testUnknownImplTarget() {
     )"), "cannot implement unknown struct `Missing`");
 }
 
+void testCopyValuesRemainUsable() {
+    expectValid(check(R"(
+        fn main() {
+            let a = 10;
+            let b = a;
+            print(a, b);
+        }
+    )"));
+}
+
+void testStructMoveUseAfterMove() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let packet = Packet { value: 1 };
+            let moved = packet;
+            print(packet.value, moved.value);
+        }
+    )"), "use of moved value `packet`");
+}
+
+void testFunctionArgumentMovesOwnedValue() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn consume(packet: Packet) {}
+        fn main() {
+            let packet = Packet { value: 1 };
+            consume(packet);
+            print(packet.value);
+        }
+    )"), "use of moved value `packet`");
+}
+
+void testSharedBorrowsCanCoexist() {
+    expectValid(check(R"(
+        struct Packet { value: i32 }
+        fn inspect(packet: &Packet) {
+            print(packet.value);
+        }
+        fn main() {
+            let packet = Packet { value: 1 };
+            let first = &packet;
+            let second = &packet;
+            inspect(first);
+            inspect(second);
+            print(packet.value);
+        }
+    )"));
+}
+
+void testMutableBorrowConflictsWithSharedBorrow() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            let shared = &packet;
+            let exclusive = &mut packet;
+            print(shared.value, exclusive.value);
+        }
+    )"), "already borrowed");
+}
+
+void testSecondMutableBorrowRejected() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            let first = &mut packet;
+            let second = &mut packet;
+            print(first.value, second.value);
+        }
+    )"), "already borrowed");
+}
+
+void testUseWhileMutablyBorrowedRejected() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            let reference = &mut packet;
+            print(packet.value);
+            print(reference.value);
+        }
+    )"), "while it is mutably borrowed");
+}
+
+void testMutableBorrowRequiresMutableOwner() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let packet = Packet { value: 1 };
+            let reference = &mut packet;
+            print(reference.value);
+        }
+    )"), "mutably borrow an immutable value");
+}
+
+void testBorrowEndsWithLexicalScope() {
+    expectValid(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            if true {
+                let reference = &packet;
+                print(reference.value);
+            }
+            packet.value = 2;
+            print(packet.value);
+        }
+    )"));
+}
+
+void testTemporaryBorrowEndsAfterCall() {
+    expectValid(check(R"(
+        struct Packet { value: i32 }
+        fn inspect(packet: &Packet) { print(packet.value); }
+        fn mutate(packet: &mut Packet) { packet.value = 2; }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            inspect(&packet);
+            mutate(&mut packet);
+            print(packet.value);
+        }
+    )"));
+}
+
+void testAssignmentWhileBorrowedRejected() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            let reference = &packet;
+            packet.value = 2;
+            print(reference.value);
+        }
+    )"), "while it is borrowed");
+}
+
+void testMoveWhileBorrowedRejected() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let packet = Packet { value: 1 };
+            let reference = &packet;
+            let moved = packet;
+            print(reference.value, moved.value);
+        }
+    )"), "cannot move `packet` while it is borrowed");
+}
+
+void testConsumingMethodMovesReceiver() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        impl Packet {
+            fn consume(self) {}
+        }
+        fn main() {
+            let packet = Packet { value: 1 };
+            packet.consume();
+            print(packet.value);
+        }
+    )"), "use of moved value `packet`");
+}
+
+void testConsumingMethodThroughReferenceRejected() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        impl Packet {
+            fn consume(self) {}
+        }
+        fn main() {
+            let packet = Packet { value: 1 };
+            let reference = &packet;
+            reference.consume();
+        }
+    )"), "consuming method");
+}
+
+void testMutableReferenceCanMutatePointee() {
+    expectValid(check(R"(
+        struct Packet { value: i32 }
+        fn mutate(packet: &mut Packet) {
+            packet.value = 3;
+        }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            mutate(&mut packet);
+            print(packet.value);
+        }
+    )"));
+}
+
+void testSharedReferenceCannotMutatePointee() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn mutate(packet: &Packet) {
+            packet.value = 3;
+        }
+        fn main() {
+            let packet = Packet { value: 1 };
+            mutate(&packet);
+        }
+    )"), "immutable");
+}
+
+void testReferenceReturnRejectedForNow() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn identity(packet: &Packet) -> &Packet {
+            packet
+        }
+    )"), "returning references is not supported");
+}
+
+void testReferenceFieldRejectedForNow() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        struct View { packet: &Packet }
+        fn main() {}
+    )"), "reference fields require lifetime inference");
+}
+
+void testNonCopyArrayRepeatRejected() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let packet = Packet { value: 1 };
+            let packets = [packet; 4];
+            print(packets[0].value);
+        }
+    )"), "array repetition requires a Copy value");
+}
+
+void testStringMove() {
+    expectSemanticErrorContaining(check(R"(
+        fn main() {
+            let source = "hello";
+            let destination = source;
+            print(source, destination);
+        }
+    )"), "use of moved value `source`");
+}
+
+void testReinitializeAfterMove() {
+    expectValid(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            let moved = packet;
+            packet = Packet { value: 2 };
+            print(packet.value, moved.value);
+        }
+    )"));
+}
+
+void testMutableReferenceMovePreventsAliasing() {
+    expectSemanticErrorContaining(check(R"(
+        struct Packet { value: i32 }
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            let first = &mut packet;
+            let second = first;
+            print(first.value, second.value);
+        }
+    )"), "use of moved value `first`");
+}
+
 } // namespace
 
 int main() {
@@ -471,6 +738,28 @@ int main() {
     testImmutableFieldAssignment();
     testDuplicateStructField();
     testUnknownImplTarget();
+    testCopyValuesRemainUsable();
+    testStructMoveUseAfterMove();
+    testFunctionArgumentMovesOwnedValue();
+    testSharedBorrowsCanCoexist();
+    testMutableBorrowConflictsWithSharedBorrow();
+    testSecondMutableBorrowRejected();
+    testUseWhileMutablyBorrowedRejected();
+    testMutableBorrowRequiresMutableOwner();
+    testBorrowEndsWithLexicalScope();
+    testTemporaryBorrowEndsAfterCall();
+    testAssignmentWhileBorrowedRejected();
+    testMoveWhileBorrowedRejected();
+    testConsumingMethodMovesReceiver();
+    testConsumingMethodThroughReferenceRejected();
+    testMutableReferenceCanMutatePointee();
+    testSharedReferenceCannotMutatePointee();
+    testReferenceReturnRejectedForNow();
+    testReferenceFieldRejectedForNow();
+    testNonCopyArrayRepeatRejected();
+    testStringMove();
+    testReinitializeAfterMove();
+    testMutableReferenceMovePreventsAliasing();
     std::cout << "semantic tests passed\n";
     return 0;
 }

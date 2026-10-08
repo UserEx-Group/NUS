@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.5.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,3 +39,7 @@ add_test(NAME parser COMMAND nus_parser_tests)
 add_executable(nus_semantic_tests tests/SemanticTests.cpp)
 target_link_libraries(nus_semantic_tests PRIVATE nus_frontend)
 add_test(NAME semantic COMMAND nus_semantic_tests)
+
+add_executable(nus_ownership_tests tests/OwnershipTests.cpp)
+target_link_libraries(nus_ownership_tests PRIVATE nus_frontend)
+add_test(NAME ownership COMMAND nus_ownership_tests)
