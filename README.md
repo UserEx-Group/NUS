@@ -4,65 +4,82 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > High-level by default. Low-level by choice. Safe by default.
 
-## Milestone 4
+## Milestone 5 — User-defined types
 
-The compiler bootstrap is written in C++20. The frontend now includes lexical analysis, parsing and the first semantic-analysis layer.
+The C++20 compiler frontend now supports the first nominal user-defined type model.
 
-### Frontend
+### Implemented
 
-- `SourceManager` / `SourceSpan`
-- lexer and token model
-- recursive-descent parser for declarations and control flow
-- Pratt parser for expressions
-- typed function declarations
-- `let`, `let mut`, `return`, `break`, `continue`
-- `if`, `while`, `loop`, `for`
-- arrays, indexing, slicing and ranges
-- function calls, member syntax and assignments
-- AST debug printer
+- source management, lexer, parser and AST
+- Pratt expression parser and control flow
+- lexical scopes, name resolution and primitive type checking
+- `struct` declarations
+- nominal struct types in parameters, returns and locals
+- struct literals with required named fields
+- field existence, duplicate-field and field-type validation
+- field access such as `packet.source`
+- field assignment with mutability propagation
+- `impl` blocks
+- method receivers: `self`, `&self`, `&mut self`
+- method lookup and argument/return-type checking
+- `&mut self` calls require a mutable receiver
+- method bodies can access and mutate `self` according to the receiver
+- AST debug output for structs, impls and struct literals
 
-### Semantic analysis
-
-- lexical symbol tables and nested scopes
-- forward resolution of top-level functions
-- built-in type registry
-- primitive types: integers, floats, `bool`, `char`, `string`, `bytes`, `unit`
-- inferred literal types (`i32`, `f64`, etc.)
-- contextual numeric-literal compatibility such as `let port: u16 = 8080;`
-- duplicate-name detection in the same scope
-- undefined-name diagnostics
-- immutable versus mutable local checking
-- function call arity and argument-type checking
-- return-type checking
-- operator type checking
-- boolean-condition checking
-- homogeneous array inference
-- array indexing and range slicing checks
-- `for` iteration over ranges, arrays and slices
-- `break` / `continue` loop-context validation
-- expression type map retained by the semantic analyzer
-
-Two small built-ins currently exist so semantic tests and example programs can run before the standard library is implemented:
+Example:
 
 ```nus
-print(value);
-assert(condition);
+struct Packet {
+    source: u32,
+    destination: u32,
+}
+
+impl Packet {
+    fn route_key(&self) -> u32 {
+        self.source + self.destination
+    }
+
+    fn set_source(&mut self, source: u32) {
+        self.source = source;
+    }
+}
+
+fn main() {
+    let mut packet = Packet {
+        source: 10,
+        destination: 20,
+    };
+
+    packet.set_source(42);
+    print(packet.route_key());
+}
 ```
 
-`print` accepts any number of values and returns `unit`. `assert` accepts exactly one `bool`.
+## Semantic rules added in this milestone
 
-## Current semantic boundary
+Struct names live in the type namespace. Struct fields are resolved from nominal type metadata rather than dynamically. A literal must initialize every declared field exactly once and cannot introduce unknown fields.
 
-The parser already understands member syntax such as:
+Mutability propagates through field l-values:
 
 ```nus
-packet.header.source
-socket.close()
+let packet = Packet { source: 1, destination: 2 };
+packet.source = 10; // error: immutable base value
 ```
 
-but structs, fields, `impl` blocks and methods are not part of the AST yet. The semantic analyzer therefore reports member access as unsupported instead of pretending that a field exists. Those features belong to the next language-model milestone.
+```nus
+let mut packet = Packet { source: 1, destination: 2 };
+packet.source = 10; // valid
+```
 
-Likewise, ownership/borrowing, `async`/`await`, user-defined types and the network DSL are still future work.
+Methods explicitly declare how they receive `self`:
+
+```nus
+fn inspect(&self) { }
+fn update(&mut self) { }
+fn consume(self) { }
+```
+
+Milestone 5 validates receiver mutability, but full move/borrow lifetime semantics are intentionally deferred to the ownership milestone.
 
 ## Build
 
@@ -72,59 +89,24 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Parse and semantically check a NUS file
+## Use
+
+Run parsing + semantic analysis + AST output:
 
 ```bash
 ./build/nusc example.nus
 ```
 
-The default command runs lexer, parser and semantic analysis, then prints the AST when the program is valid.
-
-On Windows with a multi-config generator:
-
-```powershell
-.\build\Debug\nusc.exe example.nus
-```
-
-## Check without printing the AST
+Check only:
 
 ```bash
 ./build/nusc example.nus --check
 ```
 
-A successful check exits with status `0` and produces no output.
-
-## Inspect lexer tokens
+Inspect tokens:
 
 ```bash
 ./build/nusc example.nus --tokens
-```
-
-## Example semantic errors
-
-Immutable assignment:
-
-```nus
-fn main() {
-    let port = 8080;
-    port = 9000;
-}
-```
-
-Undefined name:
-
-```nus
-fn main() {
-    print(router);
-}
-```
-
-Type mismatch:
-
-```nus
-fn main() {
-    let connected: bool = 10;
-}
 ```
 
 ## Architecture
@@ -136,29 +118,34 @@ SourceManager
     ↓
 Lexer
     ↓
-Token stream
-    ↓
 Parser
     ↓
 AST
     ↓
 SemanticAnalyzer
-    ├── SymbolTable / lexical scopes
-    ├── name resolution
-    ├── Type model
+    ├── lexical SymbolTable
+    ├── primitive Type model
+    ├── nominal Struct registry
+    ├── field metadata
+    ├── method metadata
     └── diagnostics
 ```
 
+## Current boundary
+
+This milestone does **not** claim full ownership or borrowing yet. `self`, `&self` and `&mut self` establish the semantic surface required for that work, while move tracking, borrow conflicts and lifetime analysis remain future work.
+
+Associated functions without a `self` receiver are also deferred; methods inside `impl` currently require a receiver.
+
 ## Next milestone
 
-Milestone 5 should introduce the first real user-defined type model:
+Milestone 6 should introduce ownership and borrowing foundations:
 
-1. `struct` declarations in the parser/AST
-2. struct literals
-3. field resolution
-4. `impl` blocks and methods
-5. method-call type checking
-6. richer type syntax (arrays, slices and references in annotations)
-7. groundwork for ownership and borrowing
-
-That will let NUS type-check code such as `packet.source`, `socket.close()` and protocol/header structures instead of treating member access as a syntax-only feature.
+1. value move tracking
+2. use-after-move diagnostics
+3. immutable and mutable borrow state
+4. borrow-conflict diagnostics
+5. explicit `&mut` expressions/type syntax
+6. reference-aware function parameters
+7. receiver consumption for `self`
+8. groundwork for deterministic destruction / `Drop`

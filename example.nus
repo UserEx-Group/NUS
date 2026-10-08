@@ -1,19 +1,30 @@
-fn add(a: i32, b: i32) -> i32 {
-    a + b * 2
+struct Packet {
+    source: u32,
+    destination: u32,
+    payload_size: usize,
+}
+
+impl Packet {
+    fn route_key(&self) -> u32 {
+        self.source + self.destination
+    }
+
+    fn set_source(&mut self, source: u32) {
+        self.source = source;
+    }
+}
+
+fn inspect(packet: Packet) -> u32 {
+    packet.route_key()
 }
 
 fn main() {
-    let mut result: i32 = add(10, 20);
-    result += 1;
+    let mut packet = Packet {
+        source: 10,
+        destination: 20,
+        payload_size: 1500,
+    };
 
-    if result > 20 {
-        print(result);
-    }
-
-    let buffer = [0; 4];
-    print(buffer[0]);
-
-    for index in 0..3 {
-        print(index);
-    }
+    packet.set_source(42);
+    print(packet.source, packet.payload_size, inspect(packet));
 }
