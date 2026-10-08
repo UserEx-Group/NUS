@@ -11,6 +11,13 @@ Type Type::simple(TypeKind kind) {
     return type;
 }
 
+Type Type::structure(std::string name) {
+    Type type;
+    type.kind = TypeKind::Struct;
+    type.nominal_name = std::move(name);
+    return type;
+}
+
 Type Type::array(Type element_type, std::optional<std::size_t> length) {
     Type type;
     type.kind = TypeKind::Array;
@@ -101,6 +108,10 @@ bool Type::isUnit() const noexcept {
     return kind == TypeKind::Unit;
 }
 
+bool Type::isStruct() const noexcept {
+    return kind == TypeKind::Struct;
+}
+
 std::string Type::name() const {
     switch (kind) {
         case TypeKind::Error: return "<error>";
@@ -122,6 +133,7 @@ std::string Type::name() const {
         case TypeKind::Char: return "char";
         case TypeKind::String: return "string";
         case TypeKind::Bytes: return "bytes";
+        case TypeKind::Struct: return nominal_name.empty() ? "<anonymous struct>" : nominal_name;
         case TypeKind::Array: {
             const std::string element_name = element ? element->name() : "<unknown>";
             if (array_length) return "[" + element_name + "; " + std::to_string(*array_length) + "]";
@@ -156,6 +168,8 @@ bool operator==(const Type& lhs, const Type& rhs) {
     if (lhs.kind != rhs.kind) return false;
 
     switch (lhs.kind) {
+        case TypeKind::Struct:
+            return lhs.nominal_name == rhs.nominal_name;
         case TypeKind::Array:
             if (lhs.array_length != rhs.array_length) return false;
             [[fallthrough]];

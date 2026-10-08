@@ -27,6 +27,7 @@ enum class TypeKind {
     Char,
     String,
     Bytes,
+    Struct,
     Array,
     Slice,
     Range,
@@ -36,6 +37,7 @@ enum class TypeKind {
 
 struct Type {
     TypeKind kind{TypeKind::Unknown};
+    std::string nominal_name;
     std::shared_ptr<Type> element;
     std::optional<std::size_t> array_length;
     std::vector<Type> parameters;
@@ -44,6 +46,7 @@ struct Type {
     bool mutable_reference{false};
 
     [[nodiscard]] static Type simple(TypeKind kind);
+    [[nodiscard]] static Type structure(std::string name);
     [[nodiscard]] static Type array(Type element, std::optional<std::size_t> length = std::nullopt);
     [[nodiscard]] static Type slice(Type element);
     [[nodiscard]] static Type range(Type element);
@@ -57,6 +60,7 @@ struct Type {
     [[nodiscard]] bool isFloat() const noexcept;
     [[nodiscard]] bool isBool() const noexcept;
     [[nodiscard]] bool isUnit() const noexcept;
+    [[nodiscard]] bool isStruct() const noexcept;
     [[nodiscard]] std::string name() const;
 };
 
