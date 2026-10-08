@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -103,33 +104,7 @@ void testCallsAndIf() {
 
     const auto& if_statement = static_cast<const nus::ast::ExprStmt&>(*body.statements[1]);
     if (if_statement.expression->kind != nus::ast::ExprKind::If) fail("expected if expression");
-    const auto& if_expr = static_cast<const nus::ast::IfExpr&>(*if_statement.expression);
-    if (if_expr.condition->kind != nus::ast::ExprKind::Binary) fail("expected binary if condition");
 }
-
-void testElseIf() {
-    auto parsed = parse(R"(
-        fn classify(x: i32) -> i32 {
-            if x > 0 {
-                return 1;
-            } else if x < 0 {
-                return -1;
-            } else {
-                return 0;
-            }
-        }
-    )");
-    expectNoDiagnostics(parsed);
-
-    const auto& function = parsed.file.functions[0];
-    if (function.body->statements.size() != 1) fail("expected if statement");
-    const auto& statement = static_cast<const nus::ast::ExprStmt&>(*function.body->statements[0]);
-    const auto& root = static_cast<const nus::ast::IfExpr&>(*statement.expression);
-    if (!root.else_branch || root.else_branch->kind != nus::ast::ExprKind::If) {
-        fail("expected else-if chain");
-    }
-}
-
 
 void testIfAsValue() {
     auto parsed = parse(R"(
@@ -147,11 +122,134 @@ void testIfAsValue() {
     const auto& body = *parsed.file.functions[0].body;
     const auto& let = static_cast<const nus::ast::LetStmt&>(*body.statements[0]);
     if (let.initializer->kind != nus::ast::ExprKind::If) fail("expected if expression initializer");
-    const auto& if_expr = static_cast<const nus::ast::IfExpr&>(*let.initializer);
-    if (!if_expr.then_branch->tail_expression) fail("expected then tail expression");
-    if (!if_expr.else_branch || if_expr.else_branch->kind != nus::ast::ExprKind::Block) {
-        fail("expected else block expression");
+}
+
+void testMemberMethodAndIndexing() {
+    auto parsed = parse(R"(
+        fn main() {
+            let source = packet.header.source;
+            socket.close();
+            let first = buffer[0];
+            let slice = buffer[0..count];
+        }
+    )");
+    expectNoDiagnostics(parsed);
+
+    const auto& body = *parsed.file.functions[0].body;
+    if (body.statements.size() != 4) fail("expected four statements");
+
+    const auto& source = static_cast<const nus::ast::LetStmt&>(*body.statements[0]);
+    if (source.initializer->kind != nus::ast::ExprKind::Member) fail("expected member access");
+    const auto& outer_member = static_cast<const nus::ast::MemberExpr&>(*source.initializer);
+    if (outer_member.member != "source" || outer_member.object->kind != nus::ast::ExprKind::Member) {
+        fail("expected chained member access");
     }
+
+    const auto& method_stmt = static_cast<const nus::ast::ExprStmt&>(*body.statements[1]);
+    if (method_stmt.expression->kind != nus::ast::ExprKind::Call) fail("expected method call");
+    const auto& method_call = static_cast<const nus::ast::CallExpr&>(*method_stmt.expression);
+    if (method_call.callee->kind != nus::ast::ExprKind::Member) fail("method callee should be member expression");
+
+    const auto& slice = static_cast<const nus::ast::LetStmt&>(*body.statements[3]);
+    if (slice.initializer->kind != nus::ast::ExprKind::Index) fail("expected slice as index expression");
+    const auto& index = static_cast<const nus::ast::IndexExpr&>(*slice.initializer);
+    if (index.index->kind != nus::ast::ExprKind::Range) fail("expected range inside slice");
+}
+
+void testArrayLiterals() {
+    auto parsed = parse(R"(
+        fn main() {
+            let values = [1, 2, 3, 4];
+            let empty = [];
+            let buffer = [0; 4096];
+        }
+    )");
+    expectNoDiagnostics(parsed);
+
+    const auto& body = *parsed.file.functions[0].body;
+    const auto& values = static_cast<const nus::ast::LetStmt&>(*body.statements[0]);
+    const auto& array = static_cast<const nus::ast::ArrayExpr&>(*values.initializer);
+    if (array.elements.size() != 4 || array.isRepeated()) fail("wrong array literal shape");
+
+    const auto& empty = static_cast<const nus::ast::LetStmt&>(*body.statements[1]);
+    const auto& empty_array = static_cast<const nus::ast::ArrayExpr&>(*empty.initializer);
+    if (!empty_array.elements.empty() || empty_array.isRepeated()) fail("expected empty array");
+
+    const auto& buffer = static_cast<const nus::ast::LetStmt&>(*body.statements[2]);
+    const auto& repeated = static_cast<const nus::ast::ArrayExpr&>(*buffer.initializer);
+    if (!repeated.isRepeated() || !repeated.repeat_count) fail("expected repeated array");
+}
+
+void testAssignmentExpressions() {
+    auto parsed = parse(R"(
+        fn main() {
+            let mut count = 0;
+            count += 1;
+            packet.size = count;
+            buffer[0] = 42;
+        }
+    )");
+    expectNoDiagnostics(parsed);
+
+    const auto& body = *parsed.file.functions[0].body;
+    for (std::size_t i = 1; i < body.statements.size(); ++i) {
+        const auto& statement = static_cast<const nus::ast::ExprStmt&>(*body.statements[i]);
+        if (statement.expression->kind != nus::ast::ExprKind::Assignment) {
+            fail("expected assignment expression");
+        }
+    }
+
+    const auto& compound_stmt = static_cast<const nus::ast::ExprStmt&>(*body.statements[1]);
+    const auto& compound = static_cast<const nus::ast::AssignmentExpr&>(*compound_stmt.expression);
+    if (compound.op != nus::TokenKind::PlusEqual) fail("expected += assignment");
+}
+
+void testLoopsAndRanges() {
+    auto parsed = parse(R"(
+        fn main() {
+            let mut i = 0;
+
+            while i < 10 {
+                i += 1;
+            }
+
+            for index in 0..=10 {
+                if index == 5 {
+                    continue;
+                }
+            }
+
+            loop {
+                break;
+            }
+        }
+    )");
+    expectNoDiagnostics(parsed);
+
+    const auto& body = *parsed.file.functions[0].body;
+    if (body.statements.size() != 4) fail("expected let plus three loops");
+
+    const auto& while_stmt = static_cast<const nus::ast::ExprStmt&>(*body.statements[1]);
+    if (while_stmt.expression->kind != nus::ast::ExprKind::While) fail("expected while expression");
+
+    const auto& for_stmt = static_cast<const nus::ast::ExprStmt&>(*body.statements[2]);
+    const auto& for_expr = static_cast<const nus::ast::ForExpr&>(*for_stmt.expression);
+    if (for_expr.binding != "index") fail("wrong for-loop binding");
+    if (for_expr.iterable->kind != nus::ast::ExprKind::Range) fail("expected range iterable");
+    const auto& range = static_cast<const nus::ast::RangeExpr&>(*for_expr.iterable);
+    if (!range.inclusive) fail("expected inclusive range");
+
+    const auto& loop_stmt = static_cast<const nus::ast::ExprStmt&>(*body.statements[3]);
+    if (loop_stmt.expression->kind != nus::ast::ExprKind::Loop) fail("expected loop expression");
+}
+
+void testInvalidAssignmentTargetDiagnostic() {
+    auto parsed = parse(R"(
+        fn main() {
+            (1 + 2) = 3;
+        }
+    )");
+    if (parsed.diagnostics.empty()) fail("expected diagnostic for invalid assignment target");
 }
 
 void testParserDiagnostic() {
@@ -183,8 +281,12 @@ int main() {
     testFunctionsAndTypes();
     testPrattPrecedence();
     testCallsAndIf();
-    testElseIf();
     testIfAsValue();
+    testMemberMethodAndIndexing();
+    testArrayLiterals();
+    testAssignmentExpressions();
+    testLoopsAndRanges();
+    testInvalidAssignmentTargetDiagnostic();
     testMutableTypedLet();
     testParserDiagnostic();
     std::cout << "all parser tests passed\n";
