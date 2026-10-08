@@ -321,6 +321,42 @@ void testStructsImplsAndLiterals() {
     if (literal.type.name() != "Packet" || literal.fields.size() != 2) fail("wrong struct literal");
 }
 
+void testReferenceTypesAndBorrows() {
+    auto parsed = parse(R"(
+        struct Packet { value: i32 }
+
+        fn inspect(packet: &Packet) {}
+        fn mutate(packet: &mut Packet) {}
+
+        fn main() {
+            let mut packet = Packet { value: 1 };
+            let shared = &packet;
+            let exclusive = &mut packet;
+            (*exclusive).value = 2;
+        }
+    )");
+    expectNoDiagnostics(parsed);
+
+    if (parsed.file.functions.size() != 3) fail("expected three functions");
+    const auto& inspect = parsed.file.functions[0];
+    const auto& mutate = parsed.file.functions[1];
+    if (inspect.parameters[0].type.name() != "&Packet") fail("expected shared reference type");
+    if (mutate.parameters[0].type.name() != "&mut Packet") fail("expected mutable reference type");
+
+    const auto& body = *parsed.file.functions[2].body;
+    const auto& shared = static_cast<const nus::ast::LetStmt&>(*body.statements[1]);
+    const auto& shared_borrow = static_cast<const nus::ast::UnaryExpr&>(*shared.initializer);
+    if (shared_borrow.op != nus::TokenKind::Ampersand || shared_borrow.mutable_borrow) {
+        fail("expected immutable borrow expression");
+    }
+
+    const auto& exclusive = static_cast<const nus::ast::LetStmt&>(*body.statements[2]);
+    const auto& mutable_borrow = static_cast<const nus::ast::UnaryExpr&>(*exclusive.initializer);
+    if (mutable_borrow.op != nus::TokenKind::Ampersand || !mutable_borrow.mutable_borrow) {
+        fail("expected mutable borrow expression");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -333,6 +369,7 @@ int main() {
     testAssignmentExpressions();
     testLoopsAndRanges();
     testStructsImplsAndLiterals();
+    testReferenceTypesAndBorrows();
     testInvalidAssignmentTargetDiagnostic();
     testMutableTypedLet();
     testParserDiagnostic();
