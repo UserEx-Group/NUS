@@ -1,26 +1,19 @@
-fn process(buffer: bytes, count: usize) {
-    let slice = buffer[0..count];
-    print(slice);
+fn add(a: i32, b: i32) -> i32 {
+    a + b * 2
 }
 
 fn main() {
-    let mut attempts = 0;
-    let buffer = [0; 4096];
+    let mut result: i32 = add(10, 20);
+    result += 1;
 
-    while attempts < 3 {
-        attempts += 1;
+    if result > 20 {
+        print(result);
     }
 
-    for index in 0..=10 {
-        if index == 5 {
-            continue;
-        }
+    let buffer = [0; 4];
+    print(buffer[0]);
 
-        print(buffer[index]);
-    }
-
-    loop {
-        runtime.poll();
-        break;
+    for index in 0..3 {
+        print(index);
     }
 }
