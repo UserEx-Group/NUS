@@ -1,0 +1,77 @@
+#pragma once
+
+#include "nus/ast/Ast.hpp"
+#include "nus/diagnostics/Diagnostic.hpp"
+#include "nus/sema/SymbolTable.hpp"
+#include "nus/sema/Type.hpp"
+
+#include <optional>
+#include <unordered_map>
+#include <vector>
+
+namespace nus::sema {
+
+class SemanticAnalyzer {
+public:
+    SemanticAnalyzer();
+
+    void analyze(const ast::SourceFile& file);
+
+    [[nodiscard]] const std::vector<Diagnostic>& diagnostics() const noexcept;
+    [[nodiscard]] bool hasErrors() const noexcept;
+    [[nodiscard]] const Type* typeOf(const ast::Expr& expression) const noexcept;
+
+private:
+    struct LValueInfo {
+        Type type{Type::simple(TypeKind::Error)};
+        bool is_mutable{false};
+    };
+
+    void reset();
+    void registerBuiltins();
+    void collectFunctions(const ast::SourceFile& file);
+    void analyzeFunction(const ast::FunctionDecl& function);
+
+    [[nodiscard]] Type resolveType(const ast::TypeRef& type_ref);
+    [[nodiscard]] Type checkBlock(const ast::BlockExpr& block, bool create_scope = true);
+    void checkStatement(const ast::Stmt& statement);
+    [[nodiscard]] Type checkExpr(const ast::Expr& expression);
+    [[nodiscard]] Type checkLiteral(const ast::LiteralExpr& expression);
+    [[nodiscard]] Type checkUnary(const ast::UnaryExpr& expression);
+    [[nodiscard]] Type checkBinary(const ast::BinaryExpr& expression);
+    [[nodiscard]] Type checkAssignment(const ast::AssignmentExpr& expression);
+    [[nodiscard]] Type checkCall(const ast::CallExpr& expression);
+    [[nodiscard]] Type checkMember(const ast::MemberExpr& expression);
+    [[nodiscard]] Type checkIndex(const ast::IndexExpr& expression);
+    [[nodiscard]] Type checkArray(const ast::ArrayExpr& expression);
+    [[nodiscard]] Type checkRange(const ast::RangeExpr& expression);
+    [[nodiscard]] Type checkIf(const ast::IfExpr& expression);
+    [[nodiscard]] Type checkWhile(const ast::WhileExpr& expression);
+    [[nodiscard]] Type checkLoop(const ast::LoopExpr& expression);
+    [[nodiscard]] Type checkFor(const ast::ForExpr& expression);
+
+    [[nodiscard]] LValueInfo checkLValue(const ast::Expr& expression);
+    [[nodiscard]] bool compatible(const Type& expected, const Type& actual, const ast::Expr* value = nullptr) const;
+    [[nodiscard]] bool requireBool(const ast::Expr& expression, std::string_view context);
+    [[nodiscard]] bool requireInteger(const ast::Expr& expression, std::string_view context);
+    [[nodiscard]] static bool isComparisonOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isEqualityOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isLogicalOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isBitwiseOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isShiftOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static bool isArithmeticOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static TokenKind compoundBaseOperator(TokenKind kind) noexcept;
+    [[nodiscard]] static std::optional<std::size_t> repeatedArrayLength(const ast::Expr& expression);
+
+    void recordType(const ast::Expr& expression, Type type);
+    void error(SourceSpan span, std::string message);
+
+    SymbolTable symbols_;
+    std::vector<Diagnostic> diagnostics_;
+    std::unordered_map<const ast::Expr*, Type> expression_types_;
+    std::unordered_map<const ast::FunctionDecl*, Type> function_signatures_;
+    Type current_return_type_{Type::simple(TypeKind::Unit)};
+    int loop_depth_{0};
+};
+
+} // namespace nus::sema
