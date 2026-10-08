@@ -4,179 +4,153 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > High-level by default. Low-level by choice. Safe by default.
 
-## Milestone 6 — Ownership + Borrowing foundations
+## Milestone 7 — Typed HIR + MIR/CFG foundation
 
-The C++20 compiler frontend now implements the first memory-safety ownership model on top of the nominal type system introduced in Milestone 5.
+Milestone 7 introduces the compiler's first intermediate representations. The frontend no longer needs to jump directly from AST/semantic analysis to a future native backend.
 
-### Implemented
-
-- move semantics for non-`Copy` values
-- use-after-move diagnostics
-- scalar and shared-reference `Copy` behavior
-- `&T` and `&mut T` in function parameter types
-- `&value` and `&mut value` borrow expressions
-- shared-borrow tracking
-- exclusive mutable-borrow tracking
-- lexical borrow release at scope exit
-- temporary borrow release after calls/statements
-- mutation blocked while an owner is borrowed
-- moves blocked while an owner is borrowed
-- mutable borrow requires a mutable place
-- `&mut T` is non-`Copy`, preventing accidental mutable-reference aliasing
-- reference-aware field access and mutation
-- `self` consumes method receivers
-- `&self` creates/uses a shared borrow
-- `&mut self` creates/uses an exclusive mutable borrow
-- assignment can reinitialize a moved mutable binding
-- non-`Copy` array repetition is rejected
-- conservative safety restrictions for reference escape until lifetime inference exists
-
-## Ownership model
-
-Primitive scalar values are `Copy`:
-
-```nus
-let a = 10;
-let b = a;
-print(a, b); // valid
+```text
+.nus source
+    ↓
+Lexer
+    ↓
+Parser
+    ↓
+AST
+    ↓
+SemanticAnalyzer
+    ↓
+Typed HIR
+    ↓
+MIR + explicit CFG
+    ↓
+future optimization / ownership dataflow / codegen
 ```
 
-Owned structures, strings and buffers use move semantics:
+### HIR
 
-```nus
-struct Packet { value: i32 }
+HIR is a typed, resolved representation built after semantic analysis. It adds:
 
-let packet = Packet { value: 1 };
-let moved = packet;
-print(packet.value); // error: use of moved value
+- semantic types on expressions
+- stable `LocalId` values for bindings
+- explicit distinction between locals and globals
+- shadowed variables represented by different local IDs
+- normalized method receiver metadata
+- typed struct declarations
+- structured control-flow nodes retained for convenient lowering
+
+Inspect it with:
+
+```bash
+./build/nusc example.nus --hir
 ```
 
-Passing an owned non-`Copy` value to a by-value parameter also moves it:
+A local looks roughly like:
 
-```nus
-fn send(packet: Packet) {}
-
-send(packet);
-print(packet.value); // error
+```text
+Let %0 packet: Packet mut
 ```
 
-## Borrowing
+The numeric ID is compiler identity, not source syntax. Two variables with the same source name in different scopes receive different IDs.
 
-Shared borrow:
+### MIR
 
-```nus
-fn inspect(packet: &Packet) {
-    print(packet.value);
-}
+MIR lowers structured HIR into basic blocks with explicit instructions and terminators.
 
-inspect(&packet);
+```text
+bb0:
+    %2 = binary Greater %0, `0`
+    -> branch %2 ? bb1 : bb2
+
+bb1:
+    ...
+    -> goto bb3
+
+bb2:
+    ...
+    -> goto bb3
+
+bb3:
+    -> return unit
 ```
 
-Multiple shared borrows may coexist:
+Current MIR concepts include:
 
-```nus
-let a = &packet;
-let b = &packet;
+- locals and compiler temporaries
+- assignment
+- unary and binary operations
+- explicit borrows
+- calls
+- qualified method calls
+- field access and field stores
+- indexing and indexed stores
+- arrays, ranges and struct construction
+- `if` branches
+- `while` and `loop` back-edges
+- abstract iterator lowering for `for`
+- `break` / `continue` edges
+- return terminators
+- unreachable blocks
+
+Inspect it with:
+
+```bash
+./build/nusc example.nus --mir
 ```
 
-Exclusive mutable borrow:
+### Method lowering
+
+Method syntax:
 
 ```nus
-fn update(packet: &mut Packet) {
-    packet.value = 42;
-}
-
-let mut packet = Packet { value: 1 };
-update(&mut packet);
+packet.set_source(64);
 ```
 
-A mutable borrow cannot coexist with another borrow:
+is no longer represented as an opaque member call in MIR. It is normalized toward a qualified function call:
 
-```nus
-let shared = &packet;
-let exclusive = &mut packet; // error: already borrowed
+```text
+%8 = borrow [mut] %packet
+call @Packet::set_source, %8, `64`
 ```
 
-And the owner cannot be used directly while exclusively borrowed:
+A consuming `self` receiver is passed by value. `&self` and `&mut self` receivers materialize the appropriate implicit borrow when required.
 
-```nus
-let mut packet = Packet { value: 1 };
-let reference = &mut packet;
-print(packet.value); // error
-```
+### CFG verification
 
-## Lexical borrow lifetimes
+`CfgVerifier` validates generated MIR before it is printed or handed to later passes. It currently checks:
 
-Milestone 6 deliberately uses lexical lifetimes. A stored borrow lives until the end of its lexical scope:
+- functions have basic blocks
+- entry blocks exist
+- every block has a terminator
+- `goto` targets exist
+- both branch targets exist
+- block IDs are unique
 
-```nus
-let mut packet = Packet { value: 1 };
+Invalid compiler-generated MIR is reported as an internal compiler error rather than silently continuing.
 
-if true {
-    let view = &packet;
-    print(view.value);
-} // borrow ends here
+## Ownership status
 
-packet.value = 2; // valid
-```
+The Milestone 6 ownership/borrowing checker remains active before HIR lowering:
 
-Temporary borrows passed directly to a call end with the call:
+- non-`Copy` moves
+- use-after-move rejection
+- `&T` shared borrowing
+- `&mut T` exclusive borrowing
+- lexical borrow scopes
+- temporary call borrows
+- receiver ownership semantics
+- reinitialization after move
 
-```nus
-inspect(&packet);
-update(&mut packet);
-```
+Milestone 7 does **not** yet replace that checker with MIR dataflow. It creates the representation required to do so correctly in the next phase.
 
-This model is intentionally more conservative than a future non-lexical lifetime (NLL) analysis, but it is simple, deterministic and memory-safe for the supported language subset.
+## Safe restrictions still active
 
-## Mutable references are not Copy
+Full lifetime inference is not implemented yet. NUS still conservatively rejects:
 
-Shared references can be copied. Mutable references cannot:
-
-```nus
-let mut packet = Packet { value: 1 };
-let first = &mut packet;
-let second = first;
-print(first.value); // error: first was moved
-```
-
-This prevents two independently usable `&mut` aliases from being created by ordinary assignment.
-
-## Receiver ownership
-
-Methods now participate in ownership semantics:
-
-```nus
-impl Packet {
-    fn inspect(&self) {}
-    fn update(&mut self) {}
-    fn consume(self) {}
-}
-```
-
-- `&self`: shared temporary borrow
-- `&mut self`: exclusive temporary borrow
-- `self`: consumes the receiver
-
-After:
-
-```nus
-packet.consume();
-```
-
-using `packet` again is a use-after-move error.
-
-## Safe restrictions in this milestone
-
-Full lifetime inference is not implemented yet. To avoid accepting dangling references, Milestone 6 intentionally rejects:
-
-- returning references from functions/methods
+- returning references
 - reference fields inside structs
-- borrowed values escaping a nested block expression
+- borrowed values escaping nested block expressions
 
-These restrictions will be relaxed only when the compiler can prove the required lifetime relationships.
-
-The borrow analysis is also not path-sensitive yet. It prefers conservative rejection over accepting potentially unsafe code.
+The compiler prefers rejecting code it cannot prove safe over accepting potential dangling references.
 
 ## Build
 
@@ -186,12 +160,18 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Use
+## CLI
 
-Run parsing + semantic/ownership analysis + AST output:
+AST after full semantic checking:
 
 ```bash
 ./build/nusc example.nus
+```
+
+Tokens:
+
+```bash
+./build/nusc example.nus --tokens
 ```
 
 Check only:
@@ -200,17 +180,40 @@ Check only:
 ./build/nusc example.nus --check
 ```
 
-Inspect tokens:
+Typed HIR:
 
 ```bash
-./build/nusc example.nus --tokens
+./build/nusc example.nus --hir
 ```
 
-## Architecture
+MIR / CFG:
+
+```bash
+./build/nusc example.nus --mir
+```
+
+## Tests
+
+The project now has six test suites:
 
 ```text
-.nus source
-    ↓
+lexer
+parser
+semantic
+ownership
+hir
+mir
+```
+
+Run all tests with:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+## Current architecture
+
+```text
 SourceManager
     ↓
 Lexer
@@ -220,26 +223,37 @@ Parser
 AST
     ↓
 SemanticAnalyzer
-    ├── lexical SymbolTable
-    ├── Type model
-    ├── nominal Struct registry
-    ├── name/type resolution
-    ├── move state
-    ├── shared borrow state
-    ├── mutable borrow state
-    └── diagnostics
+    ├── name resolution
+    ├── nominal types
+    ├── method resolution
+    ├── type checking
+    └── lexical ownership / borrowing
+    ↓
+HirBuilder
+    ├── typed expressions
+    ├── unique locals
+    └── receiver normalization metadata
+    ↓
+MirBuilder
+    ├── temporaries
+    ├── basic blocks
+    ├── explicit control-flow edges
+    ├── explicit borrows
+    └── normalized calls
+    ↓
+CfgVerifier
 ```
 
 ## Next milestone
 
-Milestone 7 should turn ownership from a local semantic feature into a stronger compiler model:
+Milestone 8 should use MIR for control-flow-sensitive safety rather than adding more surface syntax:
 
-1. explicit ownership/borrow facts in an intermediate representation
-2. control-flow-aware move analysis
-3. non-lexical lifetime inference
-4. deterministic destruction points
-5. `Drop` groundwork
-6. reference escape analysis
-7. groundwork for HIR/MIR lowering
+1. MIR predecessor/successor graph
+2. move-state dataflow per basic block
+3. non-lexical borrow ranges
+4. liveness analysis
+5. deterministic drop points
+6. drop elaboration groundwork
+7. reference escape analysis on CFG
 
-After that, the compiler will be in a much better position to add enums/`Option`/`Result` and eventually native code generation without baking AST-specific assumptions into every semantic pass.
+After that, NUS will be in a strong position to begin a real native backend without baking ownership rules directly into LLVM generation.

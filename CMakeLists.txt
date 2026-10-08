@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.6.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,12 +14,17 @@ add_library(nus_frontend
     src/sema/Type.cpp
     src/sema/SymbolTable.cpp
     src/sema/SemanticAnalyzer.cpp
+    src/hir/HirBuilder.cpp
+    src/hir/HirPrinter.cpp
+    src/mir/MirBuilder.cpp
+    src/mir/MirPrinter.cpp
+    src/mir/CfgVerifier.cpp
 )
 
 target_include_directories(nus_frontend PUBLIC include)
 
 target_compile_options(nus_frontend PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Wconversion>
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Wconversion -Wno-missing-field-initializers>
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
 )
 
@@ -43,3 +48,11 @@ add_test(NAME semantic COMMAND nus_semantic_tests)
 add_executable(nus_ownership_tests tests/OwnershipTests.cpp)
 target_link_libraries(nus_ownership_tests PRIVATE nus_frontend)
 add_test(NAME ownership COMMAND nus_ownership_tests)
+
+add_executable(nus_hir_tests tests/HirTests.cpp)
+target_link_libraries(nus_hir_tests PRIVATE nus_frontend)
+add_test(NAME hir COMMAND nus_hir_tests)
+
+add_executable(nus_mir_tests tests/MirTests.cpp)
+target_link_libraries(nus_mir_tests PRIVATE nus_frontend)
+add_test(NAME mir COMMAND nus_mir_tests)

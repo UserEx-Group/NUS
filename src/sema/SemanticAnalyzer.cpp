@@ -1108,6 +1108,7 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
             error(expression.span, "function `" + identifier.name + "` is not assignable");
             return {};
         }
+        recordType(expression, symbol->type);
         return LValueInfo{.type = symbol->type, .is_mutable = symbol->is_mutable};
     }
 
@@ -1119,6 +1120,7 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
                 if (!pointer.isError()) error(expression.span, "cannot assign through non-reference type `" + pointer.name() + "`");
                 return {};
             }
+            recordType(expression, *pointer.element);
             return LValueInfo{.type = *pointer.element, .is_mutable = pointer.mutable_reference};
         }
     }
@@ -1129,6 +1131,7 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
         const Type result = checkIndex(index);
         LValueInfo base = checkLValue(*index.object);
         if (object_type.kind == TypeKind::Reference && object_type.mutable_reference) base.is_mutable = true;
+        recordType(expression, result);
         return LValueInfo{.type = result, .is_mutable = base.is_mutable};
     }
 
@@ -1146,6 +1149,7 @@ SemanticAnalyzer::LValueInfo SemanticAnalyzer::checkLValue(const ast::Expr& expr
         }
         LValueInfo base = checkLValue(*member.object);
         if (object_type.kind == TypeKind::Reference && object_type.mutable_reference) base.is_mutable = true;
+        recordType(expression, *field);
         return LValueInfo{.type = *field, .is_mutable = base.is_mutable};
     }
 
