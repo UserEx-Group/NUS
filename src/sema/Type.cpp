@@ -112,6 +112,60 @@ bool Type::isStruct() const noexcept {
     return kind == TypeKind::Struct;
 }
 
+bool Type::isReference() const noexcept {
+    return kind == TypeKind::Reference;
+}
+
+bool Type::isCopy() const noexcept {
+    switch (kind) {
+        case TypeKind::Error:
+        case TypeKind::Unknown:
+        case TypeKind::Unit:
+        case TypeKind::Bool:
+        case TypeKind::I8:
+        case TypeKind::I16:
+        case TypeKind::I32:
+        case TypeKind::I64:
+        case TypeKind::ISize:
+        case TypeKind::U8:
+        case TypeKind::U16:
+        case TypeKind::U32:
+        case TypeKind::U64:
+        case TypeKind::USize:
+        case TypeKind::F32:
+        case TypeKind::F64:
+        case TypeKind::Char:
+        case TypeKind::Slice:
+        case TypeKind::Function:
+            return true;
+        case TypeKind::Reference:
+            return !mutable_reference;
+        case TypeKind::Range:
+            return !element || element->isCopy();
+        case TypeKind::Array:
+            return element && element->isCopy();
+        case TypeKind::String:
+        case TypeKind::Bytes:
+        case TypeKind::Struct:
+            return false;
+    }
+    return false;
+}
+
+bool Type::containsReference() const noexcept {
+    if (kind == TypeKind::Reference) return true;
+    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range) && element) {
+        return element->containsReference();
+    }
+    if (kind == TypeKind::Function) {
+        for (const auto& parameter : parameters) {
+            if (parameter.containsReference()) return true;
+        }
+        return return_type && return_type->containsReference();
+    }
+    return false;
+}
+
 std::string Type::name() const {
     switch (kind) {
         case TypeKind::Error: return "<error>";

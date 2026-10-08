@@ -61,6 +61,9 @@ struct Type {
     [[nodiscard]] bool isBool() const noexcept;
     [[nodiscard]] bool isUnit() const noexcept;
     [[nodiscard]] bool isStruct() const noexcept;
+    [[nodiscard]] bool isReference() const noexcept;
+    [[nodiscard]] bool isCopy() const noexcept;
+    [[nodiscard]] bool containsReference() const noexcept;
     [[nodiscard]] std::string name() const;
 };
 
