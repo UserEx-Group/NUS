@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.7.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,10 @@ add_library(nus_frontend
     src/mir/MirBuilder.cpp
     src/mir/MirPrinter.cpp
     src/mir/CfgVerifier.cpp
+    src/mir/Dataflow.cpp
+    src/mir/FlowChecker.cpp
+    src/mir/DropElaborator.cpp
+    src/mir/FlowPrinter.cpp
 )
 
 target_include_directories(nus_frontend PUBLIC include)
@@ -56,3 +60,11 @@ add_test(NAME hir COMMAND nus_hir_tests)
 add_executable(nus_mir_tests tests/MirTests.cpp)
 target_link_libraries(nus_mir_tests PRIVATE nus_frontend)
 add_test(NAME mir COMMAND nus_mir_tests)
+
+add_executable(nus_flow_tests tests/FlowTests.cpp)
+target_link_libraries(nus_flow_tests PRIVATE nus_frontend)
+add_test(NAME flow COMMAND nus_flow_tests)
+
+add_executable(nus_drop_tests tests/DropTests.cpp)
+target_link_libraries(nus_drop_tests PRIVATE nus_frontend)
+add_test(NAME drop COMMAND nus_drop_tests)

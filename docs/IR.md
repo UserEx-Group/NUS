@@ -3,35 +3,31 @@
 ## Pipeline
 
 ```text
-AST -> Semantic Analysis -> HIR -> MIR/CFG -> future backend
+AST -> Semantic Analysis -> HIR -> MIR/CFG -> Flow Analysis -> Drop Elaboration -> Backend
 ```
 
 ## HIR
 
 HIR remains structured, but every expression carries its semantic type and every local binding receives a stable `LocalId` within its function.
 
-HIR is responsible for removing source-level ambiguity, not control-flow structure. `if`, loops and blocks still exist as structured nodes.
-
 Key invariants:
 
-- semantic analysis completed successfully before lowering;
+- semantic type checking completed before lowering;
 - every local identifier resolves to one `LocalId`;
-- shadowed names have different `LocalId` values;
-- every HIR expression has a type (or `<unknown>` only where the current semantic model has not yet materialized contextual coercion information);
-- method members carry receiver mode metadata (`self`, `&self`, `&mut self`).
+- shadowed names have different IDs;
+- methods carry receiver mode metadata;
+- structs and locals are nominally typed.
 
 ## MIR
 
-MIR removes structured control flow in favor of explicit basic blocks and terminators.
-
-Each basic block ends in exactly one of:
+MIR removes structured control flow in favor of basic blocks and explicit terminators:
 
 - `goto`
 - `branch`
 - `return`
 - `unreachable`
 
-Calls, borrows, field operations and constructors are explicit instructions. Compiler-created temporaries are ordinary MIR locals marked as temporary.
+MIR instructions represent calls, borrows, construction, field/index access, assignments, iterator operations and drop operations.
 
 ### Method normalization
 
@@ -39,24 +35,18 @@ Calls, borrows, field operations and constructors are explicit instructions. Com
 packet.update(2);
 ```
 
-with:
-
-```nus
-fn update(&mut self, value: i32)
-```
-
-becomes conceptually:
+with an `&mut self` receiver becomes conceptually:
 
 ```text
 %receiver = borrow [mut] %packet
 call @Packet::update, %receiver, `2`
 ```
 
-This means the backend does not need to understand source-level method syntax.
+The call operand's MIR function type includes the normalized receiver parameter, so ownership dataflow can distinguish consuming, shared and mutable receivers.
 
 ### `for` normalization
 
-`for` currently lowers through an abstract iterator protocol:
+`for` currently lowers through:
 
 ```text
 iter.init
@@ -64,17 +54,24 @@ iter.has_next
 iter.next
 ```
 
-A later lowering pass may specialize ranges, arrays and slices without changing the frontend.
+A later specialization pass can lower ranges/arrays/slices without changing the frontend.
 
-## CFG verifier
+## Flow analysis
 
-The verifier is intentionally small in Milestone 7. It verifies structural CFG invariants before later passes run. Dataflow correctness belongs to the next milestone.
+Milestone 8 adds backward liveness and forward move-state dataflow. See `docs/FLOW.md`.
 
-## Planned Milestone 8 passes
+## Drop IR
 
-- predecessor/successor construction
-- local liveness
-- move-state dataflow
-- non-lexical borrow ranges
-- deterministic drop placement
-- reference escape analysis
+Two destruction instructions currently exist:
+
+```text
+drop
+```
+
+for definitely initialized values, and:
+
+```text
+drop.if.init
+```
+
+for path-dependent initialization. A native backend will lower conditional drops using explicit drop flags.

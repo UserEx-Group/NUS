@@ -36,11 +36,11 @@ fn main() {
     inspect(&packet);
     rewrite(&mut packet, 42);
 
-    if true {
-        let view = &packet;
-        print(view.source, view.payload_size);
-    }
+    let view = &packet;
+    print(view.source, view.payload_size);
 
+    // NLL: the shared loan ends after the last use of `view`,
+    // so a mutable receiver is legal in the same lexical block.
     packet.set_source(64);
     packet.consume();
 }

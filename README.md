@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > High-level by default. Low-level by choice. Safe by default.
 
-## Milestone 7 — Typed HIR + MIR/CFG foundation
+## Milestone 8 — MIR dataflow, NLL and drop elaboration
 
-Milestone 7 introduces the compiler's first intermediate representations. The frontend no longer needs to jump directly from AST/semantic analysis to a future native backend.
+Milestone 8 moves ownership decisions out of the source-level semantic pass and onto MIR control-flow analysis.
 
 ```text
 .nus source
@@ -18,139 +18,134 @@ Parser
 AST
     ↓
 SemanticAnalyzer
+    ├── names
+    ├── types
+    ├── mutability
+    └── method resolution
     ↓
 Typed HIR
     ↓
-MIR + explicit CFG
+MIR + CFG
     ↓
-future optimization / ownership dataflow / codegen
+Liveness Analysis
+    ↓
+FlowChecker
+    ├── move-state dataflow
+    ├── use-after-move across branches
+    ├── non-lexical borrow activity
+    └── borrow/move conflicts
+    ↓
+DropElaborator
+    ├── drop
+    └── drop.if.init
+    ↓
+future native backend
 ```
 
-### HIR
+### Non-lexical borrowing
 
-HIR is a typed, resolved representation built after semantic analysis. It adds:
+Borrow lifetimes are no longer forced to the end of the lexical block in the normal compiler pipeline.
 
-- semantic types on expressions
-- stable `LocalId` values for bindings
-- explicit distinction between locals and globals
-- shadowed variables represented by different local IDs
-- normalized method receiver metadata
-- typed struct declarations
-- structured control-flow nodes retained for convenient lowering
+This is valid:
 
-Inspect it with:
+```nus
+struct Packet { value: i32 }
+
+fn main() {
+    let mut packet = Packet { value: 1 };
+
+    let view = &packet;
+    print(view.value);
+
+    // `view` is no longer live here, so its shared loan has ended.
+    packet.value = 2;
+}
+```
+
+The liveness pass computes local `live_in`, `live_out`, and instruction-level before/after sets. A loan is considered active only while at least one reference local carrying that loan is live.
+
+### Move-state dataflow
+
+Moves are tracked over the CFG rather than only by source order. At a merge point, NUS can detect path-dependent moves:
+
+```nus
+let packet = Packet { value: 1 };
+
+if condition {
+    consume(packet);
+}
+
+print(packet.value); // rejected: packet may have been moved
+```
+
+Reinitialization restores availability:
+
+```nus
+let mut packet = Packet { value: 1 };
+let old = packet;
+packet = Packet { value: 2 };
+print(old.value, packet.value);
+```
+
+### Drop elaboration
+
+Owned, non-`Copy` locals receive explicit MIR destruction before returns.
+
+```text
+drop [packet] %0
+-> return unit
+```
+
+When ownership differs between control-flow paths, MIR emits a conditional drop placeholder:
+
+```text
+drop.if.init [packet] %0
+```
+
+A native backend will later lower this to a concrete initialization/drop flag.
+
+### Flow inspection
+
+Inspect MIR liveness and loans with:
 
 ```bash
-./build/nusc example.nus --hir
+./build/nusc example.nus --flow
 ```
 
-A local looks roughly like:
+Example:
 
 ```text
-Let %0 packet: Packet mut
+MIR FLOW
+  fn main
+    loans:
+      L0: %3 -> %0 shared
+    bb0: live_in={} live_out={}
+      #2 before={%0} after={%0, %3}
+      ...
 ```
 
-The numeric ID is compiler identity, not source syntax. Two variables with the same source name in different scopes receive different IDs.
+### MIR inspection
 
-### MIR
-
-MIR lowers structured HIR into basic blocks with explicit instructions and terminators.
-
-```text
-bb0:
-    %2 = binary Greater %0, `0`
-    -> branch %2 ? bb1 : bb2
-
-bb1:
-    ...
-    -> goto bb3
-
-bb2:
-    ...
-    -> goto bb3
-
-bb3:
-    -> return unit
-```
-
-Current MIR concepts include:
-
-- locals and compiler temporaries
-- assignment
-- unary and binary operations
-- explicit borrows
-- calls
-- qualified method calls
-- field access and field stores
-- indexing and indexed stores
-- arrays, ranges and struct construction
-- `if` branches
-- `while` and `loop` back-edges
-- abstract iterator lowering for `for`
-- `break` / `continue` edges
-- return terminators
-- unreachable blocks
-
-Inspect it with:
+`--mir` now prints MIR after drop elaboration:
 
 ```bash
 ./build/nusc example.nus --mir
 ```
 
-### Method lowering
+### Legacy lexical ownership checker
 
-Method syntax:
-
-```nus
-packet.set_source(64);
-```
-
-is no longer represented as an opaque member call in MIR. It is normalized toward a qualified function call:
-
-```text
-%8 = borrow [mut] %packet
-call @Packet::set_source, %8, `64`
-```
-
-A consuming `self` receiver is passed by value. `&self` and `&mut self` receivers materialize the appropriate implicit borrow when required.
-
-### CFG verification
-
-`CfgVerifier` validates generated MIR before it is printed or handed to later passes. It currently checks:
-
-- functions have basic blocks
-- entry blocks exist
-- every block has a terminator
-- `goto` targets exist
-- both branch targets exist
-- block IDs are unique
-
-Invalid compiler-generated MIR is reported as an internal compiler error rather than silently continuing.
-
-## Ownership status
-
-The Milestone 6 ownership/borrowing checker remains active before HIR lowering:
-
-- non-`Copy` moves
-- use-after-move rejection
-- `&T` shared borrowing
-- `&mut T` exclusive borrowing
-- lexical borrow scopes
-- temporary call borrows
-- receiver ownership semantics
-- reinitialization after move
-
-Milestone 7 does **not** yet replace that checker with MIR dataflow. It creates the representation required to do so correctly in the next phase.
+The old Milestone 6 lexical ownership implementation is still available internally as a regression/reference mode for tests, but it is no longer the normal compilation policy. Production compilation uses MIR flow analysis for move and borrow lifetimes.
 
 ## Safe restrictions still active
 
-Full lifetime inference is not implemented yet. NUS still conservatively rejects:
+Full lifetime inference is not complete. NUS still conservatively rejects:
 
-- returning references
-- reference fields inside structs
-- borrowed values escaping nested block expressions
+- returning references;
+- reference fields inside structs;
+- references escaping nested block expressions in cases the frontend cannot yet prove safe;
+- partial moves of individual struct fields as a first-class ownership state.
 
-The compiler prefers rejecting code it cannot prove safe over accepting potential dangling references.
+The current NLL implementation is local/CFG-based and does not yet model arbitrary interprocedural lifetimes.
 
 ## Build
 
@@ -162,7 +157,7 @@ ctest --test-dir build --output-on-failure
 
 ## CLI
 
-AST after full semantic checking:
+AST after all safety checks:
 
 ```bash
 ./build/nusc example.nus
@@ -186,7 +181,13 @@ Typed HIR:
 ./build/nusc example.nus --hir
 ```
 
-MIR / CFG:
+Flow/liveness information:
+
+```bash
+./build/nusc example.nus --flow
+```
+
+MIR with drop elaboration:
 
 ```bash
 ./build/nusc example.nus --mir
@@ -194,7 +195,7 @@ MIR / CFG:
 
 ## Tests
 
-The project now has six test suites:
+Milestone 8 has eight suites:
 
 ```text
 lexer
@@ -203,9 +204,11 @@ semantic
 ownership
 hir
 mir
+flow
+drop
 ```
 
-Run all tests with:
+Run them with:
 
 ```bash
 ctest --test-dir build --output-on-failure
@@ -223,37 +226,32 @@ Parser
 AST
     ↓
 SemanticAnalyzer
-    ├── name resolution
-    ├── nominal types
-    ├── method resolution
-    ├── type checking
-    └── lexical ownership / borrowing
     ↓
 HirBuilder
-    ├── typed expressions
-    ├── unique locals
-    └── receiver normalization metadata
     ↓
 MirBuilder
-    ├── temporaries
-    ├── basic blocks
-    ├── explicit control-flow edges
-    ├── explicit borrows
-    └── normalized calls
     ↓
 CfgVerifier
+    ↓
+LivenessAnalysis
+    ↓
+FlowChecker
+    ↓
+DropElaborator
+    ↓
+[Native Codegen]
 ```
 
 ## Next milestone
 
-Milestone 8 should use MIR for control-flow-sensitive safety rather than adding more surface syntax:
+Milestone 9 should begin executable code generation rather than add more surface syntax. The recommended path is:
 
-1. MIR predecessor/successor graph
-2. move-state dataflow per basic block
-3. non-lexical borrow ranges
-4. liveness analysis
-5. deterministic drop points
-6. drop elaboration groundwork
-7. reference escape analysis on CFG
-
-After that, NUS will be in a strong position to begin a real native backend without baking ownership rules directly into LLVM generation.
+1. target/data-layout abstraction;
+2. struct layout and alignment;
+3. function ABI lowering;
+4. LLVM IR backend;
+5. integer/float operations;
+6. branches and loops;
+7. stack locals and references;
+8. calls and basic runtime intrinsics;
+9. link a first native NUS executable.
