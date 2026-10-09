@@ -4,6 +4,9 @@
 #include "nus/lexer/Lexer.hpp"
 #include "nus/lexer/TokenKind.hpp"
 #include "nus/mir/CfgVerifier.hpp"
+#include "nus/mir/DropElaborator.hpp"
+#include "nus/mir/FlowChecker.hpp"
+#include "nus/mir/FlowPrinter.hpp"
 #include "nus/mir/MirBuilder.hpp"
 #include "nus/mir/MirPrinter.hpp"
 #include "nus/parser/Parser.hpp"
@@ -27,7 +30,7 @@ void printDiagnostic(const nus::SourceManager& sources, const nus::Diagnostic& d
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "usage: nusc <file.nus> [--tokens|--check|--hir|--mir]\n";
+        std::cerr << "usage: nusc <file.nus> [--tokens|--check|--hir|--mir|--flow]\n";
         return 2;
     }
 
@@ -36,7 +39,8 @@ int main(int argc, char** argv) {
     const bool check_only = option == "--check";
     const bool hir_only = option == "--hir";
     const bool mir_only = option == "--mir";
-    if (argc == 3 && !tokens_only && !check_only && !hir_only && !mir_only) {
+    const bool flow_only = option == "--flow";
+    if (argc == 3 && !tokens_only && !check_only && !hir_only && !mir_only && !flow_only) {
         std::cerr << "nusc: unknown option `" << argv[2] << "`\n";
         return 2;
     }
@@ -71,25 +75,37 @@ int main(int argc, char** argv) {
         for (const auto& diagnostic : analyzer.diagnostics()) printDiagnostic(sources, diagnostic);
         if (analyzer.hasErrors()) return 1;
 
+        nus::hir::HirBuilder hir_builder(analyzer);
+        const auto hir = hir_builder.lower(ast);
+
+        nus::mir::MirBuilder mir_builder;
+        auto mir = mir_builder.lower(hir);
+        const nus::mir::CfgVerifier verifier;
+        const auto cfg_errors = verifier.verify(mir);
+        if (!cfg_errors.empty()) {
+            for (const auto& error : cfg_errors) std::cerr << "nusc: internal MIR error: " << error << '\n';
+            return 1;
+        }
+
+        const nus::mir::FlowChecker flow_checker;
+        const auto flow = flow_checker.check(mir);
+        for (const auto& diagnostic : flow.diagnostics) printDiagnostic(sources, diagnostic);
+        if (flow.hasErrors()) return 1;
+
         if (check_only) return 0;
 
-        if (hir_only || mir_only) {
-            nus::hir::HirBuilder hir_builder(analyzer);
-            const auto hir = hir_builder.lower(ast);
-            if (hir_only) {
-                nus::hir::HirPrinter printer;
-                std::cout << printer.print(hir);
-                return 0;
-            }
-
-            nus::mir::MirBuilder mir_builder;
-            const auto mir = mir_builder.lower(hir);
-            const nus::mir::CfgVerifier verifier;
-            const auto cfg_errors = verifier.verify(mir);
-            if (!cfg_errors.empty()) {
-                for (const auto& error : cfg_errors) std::cerr << "nusc: internal MIR error: " << error << '\n';
-                return 1;
-            }
+        if (hir_only) {
+            nus::hir::HirPrinter printer;
+            std::cout << printer.print(hir);
+            return 0;
+        }
+        if (flow_only) {
+            nus::mir::FlowPrinter printer;
+            std::cout << printer.print(mir, flow);
+            return 0;
+        }
+        if (mir_only) {
+            nus::mir::DropElaborator{}.run(mir, flow);
             nus::mir::MirPrinter printer;
             std::cout << printer.print(mir);
             return 0;
