@@ -33,12 +33,19 @@ Function MirBuilder::lowerFunction(const hir::Function& source) {
     result.owner_type = source.owner_type;
     result.return_type = source.return_type;
     for (const auto& local : source.locals) {
+        bool is_parameter = false;
+        for (const auto& parameter : source.parameters) {
+            if (parameter.id == local.id) { is_parameter = true; break; }
+        }
+        const bool is_receiver = source.receiver && source.receiver->id == local.id;
         result.locals.push_back(Local{
             .id = local.id,
             .name = local.name,
             .type = local.type,
             .is_mutable = local.is_mutable,
             .is_temporary = false,
+            .is_parameter = is_parameter,
+            .is_receiver = is_receiver,
         });
     }
     result.blocks.push_back(BasicBlock{.id = 0});
@@ -147,9 +154,20 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
                 const auto& object_expr = *callee_expr.operands.at(0);
                 Operand receiver = lowerExpr(object_expr);
                 const std::string owner = baseStructName(object_expr.type);
+                sema::Type call_type = callee_expr.type;
+                if (call_type.kind == sema::TypeKind::Function) {
+                    sema::Type receiver_type = object_expr.type;
+                    while (receiver_type.kind == sema::TypeKind::Reference && receiver_type.element) receiver_type = *receiver_type.element;
+                    if (callee_expr.receiver == hir::ReceiverMode::Shared) {
+                        receiver_type = sema::Type::reference(receiver_type, false);
+                    } else if (callee_expr.receiver == hir::ReceiverMode::Mutable) {
+                        receiver_type = sema::Type::reference(receiver_type, true);
+                    }
+                    call_type.parameters.insert(call_type.parameters.begin(), receiver_type);
+                }
                 operands.push_back(Operand{.kind = OperandKind::Global,
                                            .text = owner + "::" + callee_expr.text,
-                                           .type = callee_expr.type});
+                                           .type = std::move(call_type)});
                 if (callee_expr.receiver == hir::ReceiverMode::Shared && object_expr.type.kind != sema::TypeKind::Reference) {
                     const auto ref_type = sema::Type::reference(object_expr.type, false);
                     const LocalId borrow = createTemp(ref_type);

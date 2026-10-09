@@ -41,6 +41,8 @@ enum class InstructionKind {
     IterNext,
     StoreMember,
     StoreIndex,
+    Drop,
+    DropIf,
 };
 
 struct Instruction {
@@ -76,6 +78,8 @@ struct Local {
     sema::Type type;
     bool is_mutable{false};
     bool is_temporary{false};
+    bool is_parameter{false};
+    bool is_receiver{false};
 };
 
 struct Function {
