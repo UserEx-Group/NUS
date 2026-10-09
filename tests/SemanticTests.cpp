@@ -32,7 +32,7 @@ Checked check(std::string_view source) {
     checked.parser_diagnostics = parser.diagnostics();
 
     if (checked.parser_diagnostics.empty()) {
-        nus::sema::SemanticAnalyzer analyzer;
+        nus::sema::SemanticAnalyzer analyzer(true);
         analyzer.analyze(checked.file);
         checked.semantic_diagnostics = analyzer.diagnostics();
     }
