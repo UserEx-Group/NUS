@@ -34,6 +34,8 @@ std::string instructionName(InstructionKind kind) {
         case InstructionKind::IterNext: return "iter.next";
         case InstructionKind::StoreMember: return "store.member";
         case InstructionKind::StoreIndex: return "store.index";
+        case InstructionKind::Drop: return "drop";
+        case InstructionKind::DropIf: return "drop.if.init";
     }
     return "<?>";
 }
@@ -91,6 +93,8 @@ std::string MirPrinter::print(const Program& program) const {
             out << "      %" << local.id << " " << local.name << ": " << local.type.name();
             if (local.is_mutable) out << " mut";
             if (local.is_temporary) out << " temp";
+            if (local.is_parameter) out << " param";
+            if (local.is_receiver) out << " receiver";
             out << '\n';
         }
         for (const auto& block : function.blocks) {
