@@ -134,7 +134,8 @@ bool isLiteralOfKind(const ast::Expr* expression, TokenKind kind) {
 
 } // namespace
 
-SemanticAnalyzer::SemanticAnalyzer() = default;
+SemanticAnalyzer::SemanticAnalyzer(bool lexical_ownership_checks)
+    : lexical_ownership_checks_(lexical_ownership_checks) {}
 
 void SemanticAnalyzer::reset() {
     symbols_ = SymbolTable{};
@@ -502,10 +503,12 @@ Type SemanticAnalyzer::checkExpr(const ast::Expr& expression) {
             if (const auto* symbol = symbols_.lookup(identifier.name)) {
                 result = symbol->type;
                 if (symbol->kind != SymbolKind::Function && symbol->kind != SymbolKind::BuiltinFunction) {
-                    if (symbol->is_moved) {
-                        error(expression.span, "use of moved value `" + identifier.name + "`");
-                    } else if (symbol->mutable_borrowed) {
-                        error(expression.span, "cannot use `" + identifier.name + "` while it is mutably borrowed");
+                    if (lexical_ownership_checks_) {
+                        if (symbol->is_moved) {
+                            error(expression.span, "use of moved value `" + identifier.name + "`");
+                        } else if (symbol->mutable_borrowed) {
+                            error(expression.span, "cannot use `" + identifier.name + "` while it is mutably borrowed");
+                        }
                     }
                 }
             } else {
@@ -719,7 +722,7 @@ Type SemanticAnalyzer::checkAssignment(const ast::AssignmentExpr& expression) {
     if (target.type.isError() || value.isError()) return errorType();
 
     Symbol* root = rootSymbol(*expression.target);
-    if (root && (root->shared_borrows > 0 || root->mutable_borrowed)) {
+    if (lexical_ownership_checks_ && root && (root->shared_borrows > 0 || root->mutable_borrowed)) {
         error(expression.target->span, "cannot assign to `" + root->name + "` while it is borrowed");
     }
 
@@ -1198,6 +1201,7 @@ bool SemanticAnalyzer::borrowPlace(const ast::Expr& expression, bool is_mutable,
         error(span, "cannot mutably borrow an immutable value");
         return false;
     }
+    if (!lexical_ownership_checks_) return true;
 
     Symbol* root = rootSymbol(expression);
     if (!root) {
@@ -1223,6 +1227,7 @@ bool SemanticAnalyzer::borrowPlace(const ast::Expr& expression, bool is_mutable,
 }
 
 void SemanticAnalyzer::consumeValue(const ast::Expr& expression, const Type& type, std::string_view context) {
+    if (!lexical_ownership_checks_) return;
     if (type.isError() || type.isCopy()) return;
 
     if (expression.kind == ast::ExprKind::Unary) {
@@ -1245,6 +1250,7 @@ void SemanticAnalyzer::consumeValue(const ast::Expr& expression, const Type& typ
 }
 
 void SemanticAnalyzer::reinitializeIfDirectIdentifier(const ast::Expr& expression) {
+    if (!lexical_ownership_checks_) return;
     if (expression.kind != ast::ExprKind::Identifier) return;
     const auto& identifier = static_cast<const ast::IdentifierExpr&>(expression);
     if (Symbol* symbol = symbols_.lookupMutable(identifier.name)) symbol->is_moved = false;

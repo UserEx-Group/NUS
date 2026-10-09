@@ -16,7 +16,7 @@ namespace nus::sema {
 
 class SemanticAnalyzer {
 public:
-    SemanticAnalyzer();
+    explicit SemanticAnalyzer(bool lexical_ownership_checks = false);
 
     void analyze(const ast::SourceFile& file);
 
@@ -123,6 +123,7 @@ private:
     std::vector<std::vector<BorrowRecord>> borrow_scopes_;
     std::vector<std::vector<BorrowRecord>> temporary_borrow_frames_;
     bool persist_borrows_{false};
+    bool lexical_ownership_checks_{false};
 };
 
 } // namespace nus::sema
