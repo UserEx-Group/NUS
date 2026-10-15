@@ -1,4 +1,7 @@
 #include "nus/ast/AstPrinter.hpp"
+#include "nus/codegen/LlvmEmitter.hpp"
+#include "nus/codegen/NativeToolchain.hpp"
+#include "nus/codegen/TargetInfo.hpp"
 #include "nus/hir/HirBuilder.hpp"
 #include "nus/hir/HirPrinter.hpp"
 #include "nus/lexer/Lexer.hpp"
@@ -14,6 +17,7 @@
 #include "nus/source/SourceManager.hpp"
 
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <string_view>
 
@@ -30,7 +34,7 @@ void printDiagnostic(const nus::SourceManager& sources, const nus::Diagnostic& d
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "usage: nusc <file.nus> [--tokens|--check|--hir|--mir|--flow]\n";
+        std::cerr << "usage: nusc <file.nus> [--tokens|--check|--hir|--mir|--flow|--emit-llvm|--build]\n";
         return 2;
     }
 
@@ -40,7 +44,9 @@ int main(int argc, char** argv) {
     const bool hir_only = option == "--hir";
     const bool mir_only = option == "--mir";
     const bool flow_only = option == "--flow";
-    if (argc == 3 && !tokens_only && !check_only && !hir_only && !mir_only && !flow_only) {
+    const bool emit_llvm = option == "--emit-llvm";
+    const bool build_native = option == "--build";
+    if (argc == 3 && !tokens_only && !check_only && !hir_only && !mir_only && !flow_only && !emit_llvm && !build_native) {
         std::cerr << "nusc: unknown option `" << argv[2] << "`\n";
         return 2;
     }
@@ -108,6 +114,32 @@ int main(int argc, char** argv) {
             nus::mir::DropElaborator{}.run(mir, flow);
             nus::mir::MirPrinter printer;
             std::cout << printer.print(mir);
+            return 0;
+        }
+        if (emit_llvm || build_native) {
+            nus::mir::DropElaborator{}.run(mir, flow);
+            nus::codegen::LlvmEmitter emitter;
+            const auto target = nus::codegen::TargetInfo::host();
+            const std::string llvm_ir = emitter.emit(mir, target);
+            if (emit_llvm) {
+                std::cout << llvm_ir;
+                return 0;
+            }
+
+            std::filesystem::path output(argv[1]);
+#ifdef _WIN32
+            output.replace_extension(".exe");
+#else
+            output.replace_extension();
+#endif
+            const nus::codegen::NativeToolchain toolchain;
+            const auto result = toolchain.build(llvm_ir, output);
+            if (!result.success) {
+                std::cerr << "nusc: " << result.message << '\n';
+                if (!result.command.empty()) std::cerr << "nusc: command: " << result.command << '\n';
+                return 1;
+            }
+            std::cout << "built " << result.output.string() << " for " << target.description() << '\n';
             return 0;
         }
 
