@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.8.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,6 +23,9 @@ add_library(nus_frontend
     src/mir/FlowChecker.cpp
     src/mir/DropElaborator.cpp
     src/mir/FlowPrinter.cpp
+    src/codegen/TargetInfo.cpp
+    src/codegen/LlvmEmitter.cpp
+    src/codegen/NativeToolchain.cpp
 )
 
 target_include_directories(nus_frontend PUBLIC include)
@@ -68,3 +71,11 @@ add_test(NAME flow COMMAND nus_flow_tests)
 add_executable(nus_drop_tests tests/DropTests.cpp)
 target_link_libraries(nus_drop_tests PRIVATE nus_frontend)
 add_test(NAME drop COMMAND nus_drop_tests)
+
+add_executable(nus_codegen_tests tests/CodegenTests.cpp)
+target_link_libraries(nus_codegen_tests PRIVATE nus_frontend)
+add_test(NAME codegen COMMAND nus_codegen_tests)
+
+add_executable(nus_native_tests tests/NativeTests.cpp)
+target_link_libraries(nus_native_tests PRIVATE nus_frontend)
+add_test(NAME native COMMAND nus_native_tests)
