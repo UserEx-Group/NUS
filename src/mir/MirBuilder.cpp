@@ -108,7 +108,7 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
             Operand value = lowerExpr(*expression.operands.at(1));
             if (expression.op != TokenKind::Equal) {
                 const Operand old_value = lowerExpr(target);
-                const LocalId temp = createTemp(expression.type);
+                const LocalId temp = createTemp(target.type);
                 TokenKind base = TokenKind::Invalid;
                 switch (expression.op) {
                     case TokenKind::PlusEqual: base = TokenKind::Plus; break;
