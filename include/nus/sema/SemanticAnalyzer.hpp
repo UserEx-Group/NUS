@@ -10,12 +10,21 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace nus::sema {
 
 class SemanticAnalyzer {
 public:
+    struct GenericInstantiation {
+        const ast::FunctionDecl* declaration{nullptr};
+        std::string source_name;
+        std::string symbol_name;
+        std::vector<std::pair<std::string, Type>> substitutions;
+        Type signature{Type::simple(TypeKind::Error)};
+        bool builtin{false};
+    };
     explicit SemanticAnalyzer(bool lexical_ownership_checks = false);
 
     void analyze(const ast::SourceFile& file);
@@ -23,6 +32,8 @@ public:
     [[nodiscard]] const std::vector<Diagnostic>& diagnostics() const noexcept;
     [[nodiscard]] bool hasErrors() const noexcept;
     [[nodiscard]] const Type* typeOf(const ast::Expr& expression) const noexcept;
+    [[nodiscard]] const std::vector<GenericInstantiation>& genericInstantiations() const noexcept;
+    [[nodiscard]] const std::string* resolvedCallTarget(const ast::CallExpr& expression) const noexcept;
 
 private:
     struct LValueInfo {
@@ -42,6 +53,14 @@ private:
         std::unordered_map<std::string, MethodInfo> methods;
     };
 
+    struct GenericFunctionInfo {
+        const ast::FunctionDecl* declaration{nullptr};
+        std::vector<ast::GenericParameter> generic_parameters;
+        Type signature{Type::simple(TypeKind::Error)};
+        std::string builtin_base;
+        bool builtin{false};
+    };
+
     struct BorrowRecord {
         std::size_t symbol_id{0};
         bool is_mutable{false};
@@ -49,6 +68,8 @@ private:
 
     void reset();
     void registerBuiltins();
+    void collectTraits(const ast::SourceFile& file);
+    void collectTraitImpls(const ast::SourceFile& file);
     void collectStructNames(const ast::SourceFile& file);
     void collectStructFields(const ast::SourceFile& file);
     void collectFunctions(const ast::SourceFile& file);
@@ -57,6 +78,11 @@ private:
     void analyzeMethod(const std::string& target_name, const ast::FunctionDecl& method);
 
     [[nodiscard]] Type resolveType(const ast::TypeRef& type_ref);
+    [[nodiscard]] Type instantiateType(const Type& type, const std::unordered_map<std::string, Type>& substitutions) const;
+    [[nodiscard]] bool inferGeneric(const Type& pattern, const Type& actual, std::unordered_map<std::string, Type>& substitutions) const;
+    [[nodiscard]] bool satisfiesTrait(const Type& type, std::string_view trait) const;
+    [[nodiscard]] Type checkGenericCall(const ast::CallExpr& expression, const ast::IdentifierExpr& callee, const GenericFunctionInfo& generic);
+    void registerGenericBuiltin(std::string name, std::vector<ast::GenericParameter> parameters, Type signature, std::string builtin_base);
     [[nodiscard]] Type checkBlock(const ast::BlockExpr& block, bool create_scope = true);
     void checkStatement(const ast::Stmt& statement);
     [[nodiscard]] Type checkExpr(const ast::Expr& expression);
@@ -115,6 +141,12 @@ private:
     std::vector<Diagnostic> diagnostics_;
     std::unordered_map<const ast::Expr*, Type> expression_types_;
     std::unordered_map<const ast::FunctionDecl*, Type> function_signatures_;
+    std::unordered_map<std::string, GenericFunctionInfo> generic_functions_;
+    std::vector<GenericInstantiation> generic_instantiations_;
+    std::unordered_map<const ast::CallExpr*, std::string> resolved_call_targets_;
+    std::unordered_map<std::string, Type> generic_type_environment_;
+    std::unordered_set<std::string> traits_;
+    std::unordered_map<std::string, std::unordered_set<std::string>> trait_impls_;
     std::unordered_map<std::string, StructInfo> structs_;
     Type current_return_type_{Type::simple(TypeKind::Unit)};
     int loop_depth_{0};

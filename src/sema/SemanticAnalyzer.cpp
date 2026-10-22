@@ -127,6 +127,16 @@ std::optional<std::size_t> parseUnsignedLiteral(std::string text) {
     return static_cast<std::size_t>(value);
 }
 
+std::string genericSymbolPart(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char ch : text) {
+        if (std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_') out.push_back(ch);
+        else out.push_back('_');
+    }
+    return out.empty() ? std::string("type") : out;
+}
+
 bool isLiteralOfKind(const ast::Expr* expression, TokenKind kind) {
     if (!expression || expression->kind != ast::ExprKind::Literal) return false;
     return static_cast<const ast::LiteralExpr*>(expression)->literal_kind == kind;
@@ -142,6 +152,12 @@ void SemanticAnalyzer::reset() {
     diagnostics_.clear();
     expression_types_.clear();
     function_signatures_.clear();
+    generic_functions_.clear();
+    generic_instantiations_.clear();
+    resolved_call_targets_.clear();
+    generic_type_environment_.clear();
+    traits_.clear();
+    trait_impls_.clear();
     structs_.clear();
     current_return_type_ = unitType();
     loop_depth_ = 0;
@@ -155,12 +171,15 @@ void SemanticAnalyzer::reset() {
 void SemanticAnalyzer::analyze(const ast::SourceFile& file) {
     reset();
     registerBuiltins();
+    collectTraits(file);
     collectStructNames(file);
     collectStructFields(file);
+    collectTraitImpls(file);
     collectFunctions(file);
     collectMethods(file);
     for (const auto& function : file.functions) analyzeFunction(function);
     for (const auto& implementation : file.impls) {
+        if (implementation.trait) continue;
         const auto target_name = implementation.target.name();
         for (const auto& method : implementation.methods) analyzeMethod(target_name, method);
     }
@@ -177,6 +196,15 @@ bool SemanticAnalyzer::hasErrors() const noexcept {
 const Type* SemanticAnalyzer::typeOf(const ast::Expr& expression) const noexcept {
     const auto it = expression_types_.find(&expression);
     return it == expression_types_.end() ? nullptr : &it->second;
+}
+
+const std::vector<SemanticAnalyzer::GenericInstantiation>& SemanticAnalyzer::genericInstantiations() const noexcept {
+    return generic_instantiations_;
+}
+
+const std::string* SemanticAnalyzer::resolvedCallTarget(const ast::CallExpr& expression) const noexcept {
+    const auto it = resolved_call_targets_.find(&expression);
+    return it == resolved_call_targets_.end() ? nullptr : &it->second;
 }
 
 void SemanticAnalyzer::registerBuiltins() {
@@ -210,15 +238,79 @@ void SemanticAnalyzer::registerBuiltins() {
 
     builtin("string_clone", {Type::reference(string_type)}, string_type);
     builtin("string_len", {Type::reference(string_type)}, usize_type);
+    // Compatibility shims from milestone 10. New code should use the generic builtins below.
     builtin("vec_new_i32", {}, vec_i32);
     builtin("vec_push_i32", {Type::reference(vec_i32, true), i32_type}, unitType());
     builtin("vec_len_i32", {Type::reference(vec_i32)}, usize_type);
     builtin("vec_get_i32", {Type::reference(vec_i32), usize_type}, i32_type);
+
+    const Type t = Type::typeParameter("T");
+    const Type t_copy = Type::typeParameter("T", {"Copy"});
+    const Type e = Type::typeParameter("E");
+    ast::GenericParameter gp_t; gp_t.name = "T";
+    ast::GenericParameter gp_t_copy; gp_t_copy.name = "T"; gp_t_copy.bounds = {"Copy"};
+    ast::GenericParameter gp_e; gp_e.name = "E";
+
+    registerGenericBuiltin("vec_new", {gp_t}, Type::function({}, Type::vector(t)), "__builtin_vec_new");
+    registerGenericBuiltin("vec_push", {gp_t}, Type::function({Type::reference(Type::vector(t), true), t}, unitType()), "__builtin_vec_push");
+    registerGenericBuiltin("vec_len", {gp_t}, Type::function({Type::reference(Type::vector(t))}, usize_type), "__builtin_vec_len");
+    registerGenericBuiltin("vec_get", {gp_t_copy}, Type::function({Type::reference(Type::vector(t_copy)), usize_type}, t_copy), "__builtin_vec_get");
+    registerGenericBuiltin("some", {gp_t}, Type::function({t}, Type::option(t)), "__builtin_some");
+    registerGenericBuiltin("none", {gp_t}, Type::function({}, Type::option(t)), "__builtin_none");
+    registerGenericBuiltin("ok", {gp_t, gp_e}, Type::function({t}, Type::result(t, e)), "__builtin_ok");
+    registerGenericBuiltin("err", {gp_t, gp_e}, Type::function({e}, Type::result(t, e)), "__builtin_err");
+}
+
+void SemanticAnalyzer::registerGenericBuiltin(std::string name, std::vector<ast::GenericParameter> parameters,
+                                              Type signature, std::string builtin_base) {
+    GenericFunctionInfo info;
+    info.generic_parameters = std::move(parameters);
+    info.signature = std::move(signature);
+    info.builtin_base = std::move(builtin_base);
+    info.builtin = true;
+    generic_functions_.insert_or_assign(std::move(name), std::move(info));
+}
+
+void SemanticAnalyzer::collectTraits(const ast::SourceFile& file) {
+    traits_.insert("Copy");
+    for (const auto& trait : file.traits) {
+        if (trait.name == "Copy") {
+            error(trait.span, "`Copy` is a built-in trait and cannot be redeclared");
+            continue;
+        }
+        if (!traits_.insert(trait.name).second) {
+            error(trait.span, "duplicate trait `" + trait.name + "`");
+        }
+    }
+}
+
+void SemanticAnalyzer::collectTraitImpls(const ast::SourceFile& file) {
+    for (const auto& implementation : file.impls) {
+        if (!implementation.trait) continue;
+        const std::string trait_name = implementation.trait->name();
+        if (!traits_.contains(trait_name)) {
+            error(implementation.trait->span, "unknown trait `" + trait_name + "`");
+            continue;
+        }
+        if (trait_name == "Copy") {
+            error(implementation.trait->span, "manual implementations of built-in trait `Copy` are not supported");
+            continue;
+        }
+        const Type target = resolveType(implementation.target);
+        if (target.isError()) continue;
+        if (!implementation.methods.empty()) {
+            error(implementation.span, "milestone 11 supports marker trait implementations only");
+        }
+        auto& implementations = trait_impls_[trait_name];
+        if (!implementations.insert(target.name()).second) {
+            error(implementation.span, "duplicate implementation of trait `" + trait_name + "` for `" + target.name() + "`");
+        }
+    }
 }
 
 void SemanticAnalyzer::collectStructNames(const ast::SourceFile& file) {
     for (const auto& structure : file.structs) {
-        if (simpleTypeKind(structure.name) || structure.name == "Vec") {
+        if (simpleTypeKind(structure.name) || structure.name == "Vec" || structure.name == "Option" || structure.name == "Result") {
             error(structure.span, "struct name `" + structure.name + "` conflicts with a built-in type");
             continue;
         }
@@ -253,6 +345,23 @@ void SemanticAnalyzer::collectStructFields(const ast::SourceFile& file) {
 
 void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
     for (const auto& function : file.functions) {
+        generic_type_environment_.clear();
+        bool bad_generic = false;
+        for (const auto& parameter : function.generic_parameters) {
+            if (generic_type_environment_.contains(parameter.name)) {
+                error(parameter.span, "duplicate generic parameter `" + parameter.name + "`");
+                bad_generic = true;
+                continue;
+            }
+            for (const auto& bound : parameter.bounds) {
+                if (!traits_.contains(bound)) {
+                    error(parameter.span, "unknown trait bound `" + bound + "`");
+                    bad_generic = true;
+                }
+            }
+            generic_type_environment_.emplace(parameter.name, Type::typeParameter(parameter.name, parameter.bounds));
+        }
+
         std::vector<Type> parameters;
         parameters.reserve(function.parameters.size());
         for (const auto& parameter : function.parameters) parameters.push_back(resolveType(parameter.type));
@@ -260,22 +369,44 @@ void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
         if (function.return_type && result.containsReference()) {
             error(function.return_type->span, "returning references is not supported until lifetime inference is implemented");
         }
+        Type signature = Type::function(std::move(parameters), result);
+        function_signatures_.insert_or_assign(&function, signature);
 
+        if (!function.generic_parameters.empty()) {
+            if (symbols_.lookup(function.name) || generic_functions_.contains(function.name)) {
+                error(function.span, "duplicate function `" + function.name + "`");
+            } else if (!bad_generic) {
+                GenericFunctionInfo info;
+                info.declaration = &function;
+                info.generic_parameters = function.generic_parameters;
+                info.signature = std::move(signature);
+                generic_functions_.emplace(function.name, std::move(info));
+            }
+            generic_type_environment_.clear();
+            continue;
+        }
+
+        if (generic_functions_.contains(function.name)) {
+            error(function.span, "function `" + function.name + "` conflicts with a generic function of the same name");
+            generic_type_environment_.clear();
+            continue;
+        }
         Symbol symbol;
         symbol.id = next_symbol_id_++;
         symbol.name = function.name;
         symbol.kind = SymbolKind::Function;
-        symbol.type = Type::function(std::move(parameters), result);
-        function_signatures_.insert_or_assign(&function, symbol.type);
+        symbol.type = std::move(signature);
         symbol.span = function.span;
         if (!symbols_.declare(std::move(symbol))) {
             error(function.span, "duplicate function `" + function.name + "`");
         }
+        generic_type_environment_.clear();
     }
 }
 
 void SemanticAnalyzer::collectMethods(const ast::SourceFile& file) {
     for (const auto& implementation : file.impls) {
+        if (implementation.trait) continue;
         const auto target_name = implementation.target.name();
         auto struct_it = structs_.find(target_name);
         if (struct_it == structs_.end()) {
@@ -284,6 +415,10 @@ void SemanticAnalyzer::collectMethods(const ast::SourceFile& file) {
         }
 
         for (const auto& method : implementation.methods) {
+            if (!method.generic_parameters.empty()) {
+                error(method.span, "generic methods are not supported in milestone 11");
+                continue;
+            }
             if (method.receiver == ast::ReceiverKind::None) {
                 error(method.span, "method `" + method.name + "` must declare a `self` receiver");
             }
@@ -311,6 +446,10 @@ void SemanticAnalyzer::collectMethods(const ast::SourceFile& file) {
 }
 
 void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
+    generic_type_environment_.clear();
+    for (const auto& parameter : function.generic_parameters) {
+        generic_type_environment_.emplace(parameter.name, Type::typeParameter(parameter.name, parameter.bounds));
+    }
     const auto signature_it = function_signatures_.find(&function);
     const Type signature = signature_it != function_signatures_.end()
                                ? signature_it->second
@@ -341,6 +480,7 @@ void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
     }
 
     popScope();
+    generic_type_environment_.clear();
 }
 
 void SemanticAnalyzer::analyzeMethod(const std::string& target_name, const ast::FunctionDecl& method) {
@@ -402,12 +542,30 @@ Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
     }
 
     Type base = errorType();
-    if (base_name == "Vec") {
+    if (const auto generic = generic_type_environment_.find(base_name); generic != generic_type_environment_.end()) {
+        if (!type_ref.generic_arguments.empty()) {
+            error(type_ref.span, "generic parameter `" + base_name + "` does not accept type arguments");
+            return errorType();
+        }
+        base = generic->second;
+    } else if (base_name == "Vec") {
         if (type_ref.generic_arguments.size() != 1) {
             error(type_ref.span, "`Vec` expects exactly one type argument");
             return errorType();
         }
         base = Type::vector(resolveType(type_ref.generic_arguments.front()));
+    } else if (base_name == "Option") {
+        if (type_ref.generic_arguments.size() != 1) {
+            error(type_ref.span, "`Option` expects exactly one type argument");
+            return errorType();
+        }
+        base = Type::option(resolveType(type_ref.generic_arguments.front()));
+    } else if (base_name == "Result") {
+        if (type_ref.generic_arguments.size() != 2) {
+            error(type_ref.span, "`Result` expects exactly two type arguments");
+            return errorType();
+        }
+        base = Type::result(resolveType(type_ref.generic_arguments[0]), resolveType(type_ref.generic_arguments[1]));
     } else if (const auto kind = simpleTypeKind(base_name)) {
         if (!type_ref.generic_arguments.empty()) {
             error(type_ref.span, "type `" + base_name + "` does not accept generic arguments");
@@ -427,6 +585,172 @@ Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
 
     if (type_ref.is_reference) return Type::reference(std::move(base), type_ref.is_mutable_reference);
     return base;
+}
+
+Type SemanticAnalyzer::instantiateType(const Type& type, const std::unordered_map<std::string, Type>& substitutions) const {
+    if (type.kind == TypeKind::TypeParameter) {
+        const auto found = substitutions.find(type.nominal_name);
+        return found == substitutions.end() ? type : found->second;
+    }
+    if (type.kind == TypeKind::Reference && type.element) {
+        return Type::reference(instantiateType(*type.element, substitutions), type.mutable_reference);
+    }
+    if (type.kind == TypeKind::Vec && type.element) return Type::vector(instantiateType(*type.element, substitutions));
+    if (type.kind == TypeKind::Option && type.element) return Type::option(instantiateType(*type.element, substitutions));
+    if (type.kind == TypeKind::Array && type.element) return Type::array(instantiateType(*type.element, substitutions), type.array_length);
+    if (type.kind == TypeKind::Slice && type.element) return Type::slice(instantiateType(*type.element, substitutions));
+    if (type.kind == TypeKind::Range && type.element) return Type::range(instantiateType(*type.element, substitutions));
+    if (type.kind == TypeKind::Result && type.generic_arguments.size() == 2) {
+        return Type::result(instantiateType(type.generic_arguments[0], substitutions),
+                            instantiateType(type.generic_arguments[1], substitutions));
+    }
+    if (type.kind == TypeKind::Function) {
+        std::vector<Type> parameters;
+        parameters.reserve(type.parameters.size());
+        for (const auto& parameter : type.parameters) parameters.push_back(instantiateType(parameter, substitutions));
+        const Type result = type.return_type ? instantiateType(*type.return_type, substitutions) : unitType();
+        return Type::function(std::move(parameters), result, type.variadic_any);
+    }
+    return type;
+}
+
+bool SemanticAnalyzer::inferGeneric(const Type& pattern, const Type& actual,
+                                    std::unordered_map<std::string, Type>& substitutions) const {
+    if (pattern.kind == TypeKind::TypeParameter) {
+        const auto found = substitutions.find(pattern.nominal_name);
+        if (found == substitutions.end()) {
+            substitutions.emplace(pattern.nominal_name, actual);
+            return true;
+        }
+        return found->second == actual;
+    }
+    if (pattern.kind != actual.kind) {
+        // A mutable reference can satisfy a shared-reference pattern.
+        if (pattern.kind == TypeKind::Reference && actual.kind == TypeKind::Reference &&
+            !pattern.mutable_reference && actual.mutable_reference && pattern.element && actual.element) {
+            return inferGeneric(*pattern.element, *actual.element, substitutions);
+        }
+        return false;
+    }
+    switch (pattern.kind) {
+        case TypeKind::Reference:
+            if (pattern.mutable_reference != actual.mutable_reference || !pattern.element || !actual.element) return false;
+            return inferGeneric(*pattern.element, *actual.element, substitutions);
+        case TypeKind::Vec:
+        case TypeKind::Option:
+        case TypeKind::Array:
+        case TypeKind::Slice:
+        case TypeKind::Range:
+            if (!pattern.element || !actual.element) return pattern.element == actual.element;
+            return inferGeneric(*pattern.element, *actual.element, substitutions);
+        case TypeKind::Result:
+            if (pattern.generic_arguments.size() != actual.generic_arguments.size()) return false;
+            for (std::size_t i = 0; i < pattern.generic_arguments.size(); ++i) {
+                if (!inferGeneric(pattern.generic_arguments[i], actual.generic_arguments[i], substitutions)) return false;
+            }
+            return true;
+        default:
+            return pattern == actual;
+    }
+}
+
+bool SemanticAnalyzer::satisfiesTrait(const Type& type, std::string_view trait) const {
+    if (trait == "Copy") return type.isCopy();
+    const auto found = trait_impls_.find(std::string(trait));
+    return found != trait_impls_.end() && found->second.contains(type.name());
+}
+
+Type SemanticAnalyzer::checkGenericCall(const ast::CallExpr& expression, const ast::IdentifierExpr& callee,
+                                        const GenericFunctionInfo& generic) {
+    std::unordered_map<std::string, Type> substitutions;
+    if (!expression.generic_arguments.empty()) {
+        if (expression.generic_arguments.size() != generic.generic_parameters.size()) {
+            error(expression.span, "generic function `" + callee.name + "` expects " +
+                  std::to_string(generic.generic_parameters.size()) + " type argument(s), found " +
+                  std::to_string(expression.generic_arguments.size()));
+        }
+        const auto count = std::min(expression.generic_arguments.size(), generic.generic_parameters.size());
+        for (std::size_t i = 0; i < count; ++i) {
+            substitutions.emplace(generic.generic_parameters[i].name, resolveType(expression.generic_arguments[i]));
+        }
+    }
+
+    beginTemporaryBorrowFrame();
+    const bool old_persistence = persist_borrows_;
+    persist_borrows_ = false;
+    std::vector<Type> actual_types;
+    actual_types.reserve(expression.arguments.size());
+    for (const auto& argument : expression.arguments) actual_types.push_back(checkExpr(*argument));
+
+    if (expression.arguments.size() != generic.signature.parameters.size()) {
+        error(expression.span, "generic function `" + callee.name + "` expects " +
+              std::to_string(generic.signature.parameters.size()) + " argument(s), found " +
+              std::to_string(expression.arguments.size()));
+    }
+    const auto count = std::min(actual_types.size(), generic.signature.parameters.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!inferGeneric(generic.signature.parameters[i], actual_types[i], substitutions)) {
+            // A later compatibility diagnostic provides the concrete mismatch.
+        }
+    }
+
+    bool complete = true;
+    for (const auto& parameter : generic.generic_parameters) {
+        if (!substitutions.contains(parameter.name)) {
+            error(expression.span, "cannot infer generic parameter `" + parameter.name +
+                  "` for `" + callee.name + "`; provide explicit arguments with `::<...>`");
+            complete = false;
+            continue;
+        }
+        const Type& concrete = substitutions.at(parameter.name);
+        for (const auto& bound : parameter.bounds) {
+            if (!satisfiesTrait(concrete, bound)) {
+                error(expression.span, "type `" + concrete.name() + "` does not satisfy trait bound `" + bound + "`");
+                complete = false;
+            }
+        }
+    }
+
+    const Type signature = instantiateType(generic.signature, substitutions);
+    recordType(*expression.callee, signature);
+    for (std::size_t i = 0; i < count; ++i) {
+        const Type& expected = signature.parameters[i];
+        if (!compatible(expected, actual_types[i], expression.arguments[i].get())) {
+            error(expression.arguments[i]->span, "argument " + std::to_string(i + 1) + " expects `" +
+                  expected.name() + "`, found `" + actual_types[i].name() + "`");
+            continue;
+        }
+        if (!expected.isReference()) consumeValue(*expression.arguments[i], actual_types[i], "generic function argument");
+    }
+    persist_borrows_ = old_persistence;
+    endTemporaryBorrowFrame();
+
+    std::string symbol = generic.builtin ? generic.builtin_base : callee.name + "$g";
+    std::vector<std::pair<std::string, Type>> ordered;
+    ordered.reserve(generic.generic_parameters.size());
+    for (const auto& parameter : generic.generic_parameters) {
+        const auto found = substitutions.find(parameter.name);
+        if (found == substitutions.end()) continue;
+        symbol += "$" + genericSymbolPart(found->second.name());
+        ordered.emplace_back(parameter.name, found->second);
+    }
+    resolved_call_targets_.insert_or_assign(&expression, symbol);
+
+    if (complete) {
+        const bool exists = std::any_of(generic_instantiations_.begin(), generic_instantiations_.end(),
+            [&](const GenericInstantiation& item) { return item.symbol_name == symbol; });
+        if (!exists) {
+            generic_instantiations_.push_back(GenericInstantiation{
+                .declaration = generic.declaration,
+                .source_name = callee.name,
+                .symbol_name = symbol,
+                .substitutions = std::move(ordered),
+                .signature = signature,
+                .builtin = generic.builtin,
+            });
+        }
+    }
+    return signature.return_type ? *signature.return_type : unitType();
 }
 
 Type SemanticAnalyzer::checkBlock(const ast::BlockExpr& block, bool create_scope) {
@@ -801,7 +1125,20 @@ Type SemanticAnalyzer::checkAssignment(const ast::AssignmentExpr& expression) {
 
 Type SemanticAnalyzer::checkCall(const ast::CallExpr& expression) {
     if (expression.callee->kind == ast::ExprKind::Member) {
+        if (!expression.generic_arguments.empty()) {
+            error(expression.span, "explicit generic arguments on methods are not supported in milestone 11");
+        }
         return checkMethodCall(expression, static_cast<const ast::MemberExpr&>(*expression.callee));
+    }
+
+    if (expression.callee->kind == ast::ExprKind::Identifier) {
+        const auto& identifier = static_cast<const ast::IdentifierExpr&>(*expression.callee);
+        if (const auto found = generic_functions_.find(identifier.name); found != generic_functions_.end()) {
+            return checkGenericCall(expression, identifier, found->second);
+        }
+    }
+    if (!expression.generic_arguments.empty()) {
+        error(expression.span, "explicit generic arguments require a generic function");
     }
 
     const Type callee = checkExpr(*expression.callee);
