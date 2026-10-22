@@ -49,6 +49,12 @@ std::string quote(const std::filesystem::path& value) { return "\"" + value.stri
 } // namespace
 
 int main() {
+#ifdef _WIN32
+    if (nus::codegen::NativeToolchain::mingwRoot().empty()) {
+        std::cout << "native tests skipped: MinGW-w64 is not available\n";
+        return 0;
+    }
+#endif
     if (!nus::codegen::NativeToolchain::clangAvailable()) {
         std::cout << "native tests skipped: clang is not available\n";
         return 0;
