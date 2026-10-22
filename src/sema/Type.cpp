@@ -1,5 +1,6 @@
 #include "nus/sema/Type.hpp"
 
+#include <algorithm>
 #include <sstream>
 #include <utility>
 
@@ -44,6 +45,29 @@ Type Type::vector(Type element_type) {
     Type type;
     type.kind = TypeKind::Vec;
     type.element = std::make_shared<Type>(std::move(element_type));
+    return type;
+}
+
+Type Type::option(Type element_type) {
+    Type type;
+    type.kind = TypeKind::Option;
+    type.element = std::make_shared<Type>(std::move(element_type));
+    return type;
+}
+
+Type Type::result(Type ok_type, Type error_type) {
+    Type type;
+    type.kind = TypeKind::Result;
+    type.generic_arguments.push_back(std::move(ok_type));
+    type.generic_arguments.push_back(std::move(error_type));
+    return type;
+}
+
+Type Type::typeParameter(std::string name, std::vector<std::string> bounds) {
+    Type type;
+    type.kind = TypeKind::TypeParameter;
+    type.nominal_name = std::move(name);
+    type.trait_bounds = std::move(bounds);
     return type;
 }
 
@@ -151,6 +175,12 @@ bool Type::isCopy() const noexcept {
             return !element || element->isCopy();
         case TypeKind::Array:
             return element && element->isCopy();
+        case TypeKind::Option:
+            return element && element->isCopy();
+        case TypeKind::Result:
+            return generic_arguments.size() == 2 && generic_arguments[0].isCopy() && generic_arguments[1].isCopy();
+        case TypeKind::TypeParameter:
+            return std::find(trait_bounds.begin(), trait_bounds.end(), "Copy") != trait_bounds.end();
         case TypeKind::String:
         case TypeKind::Bytes:
         case TypeKind::Vec:
@@ -162,8 +192,11 @@ bool Type::isCopy() const noexcept {
 
 bool Type::containsReference() const noexcept {
     if (kind == TypeKind::Reference) return true;
-    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec) && element) {
+    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec || kind == TypeKind::Option) && element) {
         return element->containsReference();
+    }
+    if (kind == TypeKind::Result) {
+        for (const auto& argument : generic_arguments) if (argument.containsReference()) return true;
     }
     if (kind == TypeKind::Function) {
         for (const auto& parameter : parameters) {
@@ -197,6 +230,12 @@ std::string Type::name() const {
         case TypeKind::Bytes: return "bytes";
         case TypeKind::Vec:
             return "Vec<" + (element ? element->name() : std::string("<unknown>")) + ">";
+        case TypeKind::Option:
+            return "Option<" + (element ? element->name() : std::string("<unknown>")) + ">";
+        case TypeKind::Result:
+            return "Result<" + (generic_arguments.size() > 0 ? generic_arguments[0].name() : std::string("<unknown>")) + ", " +
+                   (generic_arguments.size() > 1 ? generic_arguments[1].name() : std::string("<unknown>")) + ">";
+        case TypeKind::TypeParameter: return nominal_name.empty() ? "<type parameter>" : nominal_name;
         case TypeKind::Struct: return nominal_name.empty() ? "<anonymous struct>" : nominal_name;
         case TypeKind::Array: {
             const std::string element_name = element ? element->name() : "<unknown>";
@@ -240,8 +279,13 @@ bool operator==(const Type& lhs, const Type& rhs) {
         case TypeKind::Slice:
         case TypeKind::Range:
         case TypeKind::Vec:
+        case TypeKind::Option:
             if (!lhs.element || !rhs.element) return lhs.element == rhs.element;
             return *lhs.element == *rhs.element;
+        case TypeKind::Result:
+            return lhs.generic_arguments == rhs.generic_arguments;
+        case TypeKind::TypeParameter:
+            return lhs.nominal_name == rhs.nominal_name;
         case TypeKind::Reference:
             if (lhs.mutable_reference != rhs.mutable_reference) return false;
             if (!lhs.element || !rhs.element) return lhs.element == rhs.element;
