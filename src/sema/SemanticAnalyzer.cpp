@@ -193,11 +193,32 @@ void SemanticAnalyzer::registerBuiltins() {
     assert_symbol.kind = SymbolKind::BuiltinFunction;
     assert_symbol.type = Type::function({boolType()}, unitType());
     (void)symbols_.declare(std::move(assert_symbol));
+
+    const Type string_type = Type::simple(TypeKind::String);
+    const Type usize_type = Type::simple(TypeKind::USize);
+    const Type i32_type = Type::simple(TypeKind::I32);
+    const Type vec_i32 = Type::vector(i32_type);
+
+    auto builtin = [&](std::string name, std::vector<Type> parameters, Type result) {
+        Symbol symbol;
+        symbol.id = next_symbol_id_++;
+        symbol.name = std::move(name);
+        symbol.kind = SymbolKind::BuiltinFunction;
+        symbol.type = Type::function(std::move(parameters), std::move(result));
+        (void)symbols_.declare(std::move(symbol));
+    };
+
+    builtin("string_clone", {Type::reference(string_type)}, string_type);
+    builtin("string_len", {Type::reference(string_type)}, usize_type);
+    builtin("vec_new_i32", {}, vec_i32);
+    builtin("vec_push_i32", {Type::reference(vec_i32, true), i32_type}, unitType());
+    builtin("vec_len_i32", {Type::reference(vec_i32)}, usize_type);
+    builtin("vec_get_i32", {Type::reference(vec_i32), usize_type}, i32_type);
 }
 
 void SemanticAnalyzer::collectStructNames(const ast::SourceFile& file) {
     for (const auto& structure : file.structs) {
-        if (simpleTypeKind(structure.name)) {
+        if (simpleTypeKind(structure.name) || structure.name == "Vec") {
             error(structure.span, "struct name `" + structure.name + "` conflicts with a built-in type");
             continue;
         }
@@ -381,9 +402,23 @@ Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
     }
 
     Type base = errorType();
-    if (const auto kind = simpleTypeKind(base_name)) {
+    if (base_name == "Vec") {
+        if (type_ref.generic_arguments.size() != 1) {
+            error(type_ref.span, "`Vec` expects exactly one type argument");
+            return errorType();
+        }
+        base = Type::vector(resolveType(type_ref.generic_arguments.front()));
+    } else if (const auto kind = simpleTypeKind(base_name)) {
+        if (!type_ref.generic_arguments.empty()) {
+            error(type_ref.span, "type `" + base_name + "` does not accept generic arguments");
+            return errorType();
+        }
         base = Type::simple(*kind);
     } else if (structs_.contains(base_name)) {
+        if (!type_ref.generic_arguments.empty()) {
+            error(type_ref.span, "user-defined generic structs are not supported yet");
+            return errorType();
+        }
         base = Type::structure(base_name);
     } else {
         error(type_ref.span, "unknown type `" + base_name + "`");

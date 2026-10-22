@@ -340,7 +340,11 @@ sema::Type HirBuilder::lowerTypeRef(const ast::TypeRef& type) const {
         return joined;
     }();
     sema::Type base = primitiveType(name);
-    if (base.kind == sema::TypeKind::Unknown) base = sema::Type::structure(name);
+    if (name == "Vec" && type.generic_arguments.size() == 1) {
+        base = sema::Type::vector(lowerTypeRef(type.generic_arguments.front()));
+    } else if (base.kind == sema::TypeKind::Unknown) {
+        base = sema::Type::structure(name);
+    }
     if (type.is_reference) return sema::Type::reference(base, type.is_mutable_reference);
     return base;
 }
