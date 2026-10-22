@@ -10,3 +10,7 @@
 
 # Native codegen scratch/output
 *.nus.ll
+
+# Root-level native outputs from `nusc --build`
+/*.exe
+/example

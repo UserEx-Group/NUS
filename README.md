@@ -4,16 +4,14 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 9 — Native Codegen
+## Milestone 10 — Runtime & ABI Foundations
 
-NUS can now compile a subset of `.nus` programs into real native executables.
+NUS now has a concrete native ABI model, heap-backed runtime values and real native drop glue.
 
 ```text
 .nus
  ↓
-Lexer
- ↓
-Parser / AST
+Lexer → Parser → AST
  ↓
 SemanticAnalyzer
  ↓
@@ -25,14 +23,14 @@ Liveness + NLL + Move Dataflow
  ↓
 DropElaborator
  ↓
-LLVM IR
+ABI / Layout + LLVM IR
  ↓
-clang
+clang + native GNU toolchain
  ↓
 native executable
 ```
 
-The backend emits textual LLVM IR. This deliberately avoids an LLVM C++ library dependency during the bootstrap phase; `clang` performs LLVM assembly and native linking.
+The bootstrap backend still emits textual LLVM IR. Runtime operations are lowered to the platform C ABI (`malloc`, `realloc`, `free`, `memcpy`, `printf`, `abort`) while NUS develops its own standard library/runtime layer.
 
 ## Build the compiler
 
@@ -42,63 +40,100 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-On Windows with a multi-config generator you may need:
+## Windows: LLVM + MinGW-w64, no MSVC
+
+The default Windows ABI is now:
+
+```text
+x86_64-w64-windows-gnu
+```
+
+NUS does **not** require MSVC for its Windows GNU target. Configure standalone LLVM and MinGW-w64 when they are not discoverable automatically:
 
 ```powershell
-cmake --build build --config Debug
-ctest --test-dir build -C Debug --output-on-failure
+$env:NUS_CLANG = "C:\LLVM\LLVM\bin\clang.exe"
+$env:NUS_MINGW = "C:\mingw64"
 ```
 
-## Compile a NUS program
-
-Inspect LLVM IR:
-
-```bash
-./build/nusc example.nus --emit-llvm
-```
-
-Build natively:
-
-```bash
-./build/nusc example.nus --build
-```
-
-Windows:
+Then:
 
 ```powershell
 .\build\nusc.exe .\example.nus --build
 .\example.exe
 ```
 
-If `clang` is not on PATH, configure it with `NUS_CLANG`.
-
-## Current example
-
-`example.nus` exercises structs, methods, references, NLL and ownership:
-
-```nus
-let mut packet = Packet {
-    source: 10,
-    destination: 20,
-    payload_size: 1500,
-};
-
-inspect(&packet);
-rewrite(&mut packet, 42);
-
-let view = &packet;
-print(view.source, view.payload_size);
-
-packet.set_source(64);
-packet.consume();
-```
-
-Its native output is:
+The native toolchain invokes the equivalent of:
 
 ```text
-30
-42 1500
-64 20 1500
+clang --target=x86_64-w64-windows-gnu --gcc-toolchain=C:\mingw64 ...
+```
+
+`NUS_MINGW` is checked first; common `C:\mingw64` and `C:\msys64\mingw64` installations are fallback locations.
+
+## Heap-backed `string`
+
+A runtime `string` now uses a three-word ABI:
+
+```text
+{ data pointer, length, capacity }
+```
+
+String literals use `capacity = 0`, which marks borrowed static storage. `string_clone` creates owned heap storage:
+
+```nus
+let literal = "network";
+let owned = string_clone(&literal);
+
+print(string_len(&owned), owned);
+```
+
+Owned strings are freed automatically by native drop glue. Moving a string transfers its drop flag, preventing double-free.
+
+## `Vec<T>` foundation
+
+The type system now understands generic vector types such as:
+
+```nus
+Vec<i32>
+```
+
+The ABI is also three words:
+
+```text
+{ data pointer, length, capacity }
+```
+
+Until generic functions are implemented, Milestone 10 exposes bootstrap `i32` vector operations:
+
+```nus
+let mut values: Vec<i32> = vec_new_i32();
+
+vec_push_i32(&mut values, 10);
+vec_push_i32(&mut values, 20);
+vec_push_i32(&mut values, 30);
+
+print(vec_len_i32(&values));
+print(vec_get_i32(&values, 1));
+```
+
+These helpers are intentionally temporary; the final standard library should expose generic `Vec<T>` methods.
+
+## ABI layout inspection
+
+```bash
+./build/nusc example.nus --layout
+```
+
+On x86-64 this includes output similar to:
+
+```text
+target x86_64-... (pointer width: 64 bits)
+string size=24 align=8
+Vec<i32> size=24 align=8
+struct Packet size=16 align=8
+  source offset=0 size=4 align=4
+  destination offset=4 size=4 align=4
+  payload_size offset=8 size=8 align=8
 ```
 
 ## Compiler inspection modes
@@ -109,13 +144,14 @@ Its native output is:
 --hir          typed HIR
 --mir          MIR after drop elaboration
 --flow         liveness/loan information
+--layout       native ABI sizes, alignments and field offsets
 --emit-llvm    LLVM IR
 --build        native executable
 ```
 
 ## Tests
 
-Milestone 9 contains ten suites:
+Milestone 10 contains twelve suites:
 
 ```text
 lexer
@@ -128,29 +164,14 @@ flow
 drop
 codegen
 native
+layout
+runtime
 ```
 
-The `native` suite invokes `clang` and executes a generated NUS binary when clang is available. If clang is unavailable, that external integration portion is skipped without breaking frontend development.
+The native/runtime suites compile LLVM IR with `clang` and execute generated NUS binaries when the native toolchain is available.
 
-## Native codegen status
+## Current boundaries
 
-Implemented in the first backend:
+Milestone 10 establishes the runtime foundation, not the final standard library. Generic functions/methods, user-defined `Drop`, reference-return lifetimes, reference fields, allocators, fallible allocation and optimized vector growth remain future work.
 
-- primitive integer/float/bool/char lowering;
-- string literals for bootstrap I/O;
-- numeric contextual coercions;
-- structs and fields;
-- references as native pointers;
-- value/shared/mutable method receivers;
-- functions and direct calls;
-- branches, loops and CFG terminators;
-- arrays and indexing foundations;
-- range iterator MIR foundations;
-- built-in `print` and `assert`;
-- C ABI entry-point wrapper.
-
-See [`docs/CODEGEN.md`](docs/CODEGEN.md) for backend details and [`docs/FLOW.md`](docs/FLOW.md) for NLL/dataflow.
-
-## Current safety restrictions
-
-Full interprocedural lifetime inference is not complete. NUS still conservatively rejects reference returns and reference fields. User-defined destruction and heap-owning runtime types are also intentionally deferred until their native ABI can be designed explicitly.
+See [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).

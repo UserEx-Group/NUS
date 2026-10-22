@@ -128,3 +128,7 @@ Milestone 9 is not yet a complete ABI/runtime implementation. Native code genera
 - optimized LLVM IR.
 
 The backend is intentionally `-O0` and correctness-oriented first.
+
+## Milestone 10 additions
+
+The Windows host target now uses the GNU ABI (`x86_64-w64-windows-gnu`) and MinGW-w64 rather than implicitly relying on MSVC libraries. Runtime codegen now imports heap primitives, emits real drop glue/drop flags, represents `string` and `Vec<T>` as three-word runtime values, and exposes a target-aware layout engine.

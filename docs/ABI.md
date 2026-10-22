@@ -1,0 +1,66 @@
+# NUS Native ABI — Milestone 10
+
+This document records the first explicit native ABI contract used by the bootstrap compiler. It is intentionally versioned and unstable before NUS 1.0.
+
+## Targets
+
+- Windows x86-64: `x86_64-w64-windows-gnu` (LLVM/Clang + MinGW-w64)
+- Linux x86-64: `x86_64-unknown-linux-gnu`
+- Linux AArch64: `aarch64-unknown-linux-gnu`
+- macOS: host Apple target
+
+Windows MSVC is not the default ABI and is not required by the GNU target.
+
+## Scalar layout
+
+| NUS type | Size | Alignment |
+| --- | ---: | ---: |
+| `bool`, `i8`, `u8` | 1 | 1 |
+| `i16`, `u16` | 2 | 2 |
+| `i32`, `u32`, `f32`, `char` | 4 | 4 |
+| `i64`, `u64`, `f64` | 8 | 8 |
+| `isize`, `usize`, references | pointer width | pointer alignment |
+
+## Aggregate layout
+
+Struct fields are laid out in declaration order. Every field starts at the next offset satisfying its alignment. The final struct size is rounded up to the largest field alignment.
+
+Arrays use the aligned element stride multiplied by their fixed element count.
+
+## Runtime values
+
+`string`:
+
+```text
+{ ptr data, usize len, usize cap }
+```
+
+`cap == 0` currently identifies static/borrowed literal storage. `cap > 0` identifies heap-owned storage that must be released.
+
+`Vec<T>`:
+
+```text
+{ ptr data, usize len, usize cap }
+```
+
+Slices remain:
+
+```text
+{ ptr data, usize len }
+```
+
+## Function lowering
+
+Top-level functions use `nus_<name>` symbols. Methods are lowered to qualified function symbols; receivers become ordinary first parameters before LLVM lowering.
+
+`main` is wrapped by a C ABI `main` entry point.
+
+## Inspection
+
+Use:
+
+```text
+nusc file.nus --layout
+```
+
+The implementation lives in `codegen/Layout` so type layout is no longer an implicit property of LLVM emission.

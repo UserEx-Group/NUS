@@ -42,5 +42,16 @@ fn main() {
     // NLL: the shared loan ends after the last use of `view`,
     // so a mutable receiver is legal in the same lexical block.
     packet.set_source(64);
+
+    let literal = "network";
+    let owned = string_clone(&literal);
+    print(string_len(&owned), owned);
+
+    let mut samples: Vec<i32> = vec_new_i32();
+    vec_push_i32(&mut samples, 10);
+    vec_push_i32(&mut samples, 20);
+    vec_push_i32(&mut samples, 30);
+    print(vec_len_i32(&samples), vec_get_i32(&samples, 1));
+
     packet.consume();
 }
