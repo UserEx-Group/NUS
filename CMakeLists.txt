@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.10.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.11.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -88,3 +88,11 @@ add_test(NAME layout COMMAND nus_layout_tests)
 add_executable(nus_runtime_tests tests/RuntimeTests.cpp)
 target_link_libraries(nus_runtime_tests PRIVATE nus_frontend)
 add_test(NAME runtime COMMAND nus_runtime_tests)
+
+add_executable(nus_generic_tests tests/GenericTests.cpp)
+target_link_libraries(nus_generic_tests PRIVATE nus_frontend)
+add_test(NAME generics COMMAND nus_generic_tests)
+
+add_executable(nus_generic_native_tests tests/GenericNativeTests.cpp)
+target_link_libraries(nus_generic_native_tests PRIVATE nus_frontend)
+add_test(NAME generic_native COMMAND nus_generic_native_tests)
