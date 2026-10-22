@@ -34,8 +34,11 @@ private:
 
     [[nodiscard]] std::optional<ast::FunctionDecl> parseFunction(bool allow_receiver = false);
     [[nodiscard]] std::optional<ast::StructDecl> parseStruct();
+    [[nodiscard]] std::optional<ast::TraitDecl> parseTrait();
     [[nodiscard]] std::optional<ast::ImplDecl> parseImpl();
     [[nodiscard]] bool parseReceiver(ast::FunctionDecl& function);
+    [[nodiscard]] std::vector<ast::GenericParameter> parseGenericParameters();
+    [[nodiscard]] std::vector<ast::TypeRef> parseExplicitGenericArguments();
     [[nodiscard]] ast::Parameter parseParameter();
     [[nodiscard]] ast::TypeRef parseType();
     [[nodiscard]] std::unique_ptr<ast::BlockExpr> parseBlock();
