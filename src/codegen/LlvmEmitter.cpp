@@ -169,6 +169,8 @@ private:
     }
     [[nodiscard]] const mir::Local& local(mir::LocalId id) const;
     [[nodiscard]] std::string slot(mir::LocalId id) const { return "%l" + std::to_string(id); }
+    [[nodiscard]] std::string dropFlag(mir::LocalId id) const { return "%df" + std::to_string(id); }
+    [[nodiscard]] std::string nextLabel(std::string_view hint) { return std::string(hint) + std::to_string(next_label_++); }
     [[nodiscard]] Value value(const mir::Operand& operand);
     [[nodiscard]] Value coerce(Value value, const sema::Type& source, const sema::Type& target);
     [[nodiscard]] sema::Type commonNumericType(const sema::Type& left, const sema::Type& right) const;
@@ -179,11 +181,21 @@ private:
     void terminator(const mir::Terminator& term);
     void builtinPrint(const std::vector<mir::Operand>& arguments);
     void printOne(const mir::Operand& operand);
+    void markMoved(const mir::Operand& operand);
+    void emitDestroy(const sema::Type& type, const std::string& pointer);
+    void emitDrop(const mir::Instruction& inst, bool conditional);
+    void builtinStringClone(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinStringLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinVecNewI32(const mir::Instruction& inst);
+    void builtinVecPushI32(const std::vector<mir::Operand>& arguments);
+    void builtinVecLenI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinVecGetI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
 
     ModuleEmitter& module_;
     const mir::Function& function_;
     std::ostringstream& out_;
     std::size_t next_value_{0};
+    std::size_t next_label_{0};
 };
 
 class ModuleEmitter {
@@ -195,7 +207,7 @@ public:
 
     std::string run() {
         std::ostringstream out;
-        out << "; NUS LLVM IR - milestone 9\n";
+        out << "; NUS LLVM IR - milestone 10\n";
         out << "; target: " << target_.description() << "\n";
         if (!target_.triple.empty()) out << "target triple = \"" << target_.triple << "\"\n";
         out << "\n";
@@ -203,7 +215,11 @@ public:
         emitRuntimeGlobals(out);
         emitStringGlobals(out);
         out << "declare i32 @printf(ptr, ...)\n";
-        out << "declare void @abort()\n\n";
+        out << "declare void @abort()\n";
+        out << "declare ptr @malloc(" << usizeType() << ")\n";
+        out << "declare ptr @realloc(ptr, " << usizeType() << ")\n";
+        out << "declare void @free(ptr)\n";
+        out << "declare ptr @memcpy(ptr, ptr, " << usizeType() << ")\n\n";
         emitAssertHelper(out);
         for (const auto& function : program_.functions) FunctionEmitter(*this, function, out).emit();
         emitMainWrapper(out);
@@ -230,6 +246,9 @@ public:
             case TypeKind::F64: return "double";
             case TypeKind::String: return "%nus.string";
             case TypeKind::Bytes: return "%nus.bytes";
+            case TypeKind::Vec:
+                if (!type.element) throw std::runtime_error("LLVM codegen: malformed Vec type");
+                return "{ ptr, " + usizeType() + ", " + usizeType() + " }";
             case TypeKind::Struct: return structSymbol(type.nominal_name);
             case TypeKind::Array:
                 if (!type.element || !type.array_length) throw std::runtime_error("LLVM codegen: unsized array is not supported");
@@ -293,7 +312,7 @@ private:
     }
 
     void emitTypeDeclarations(std::ostringstream& out) const {
-        out << "%nus.string = type { ptr, " << usizeType() << " }\n";
+        out << "%nus.string = type { ptr, " << usizeType() << ", " << usizeType() << " }\n";
         out << "%nus.bytes = type { ptr, " << usizeType() << " }\n";
         for (const auto& structure : program_.structs) {
             out << structSymbol(structure.name) << " = type { ";
@@ -409,10 +428,13 @@ Value FunctionEmitter::value(const mir::Operand& operand) {
                     const std::string ty = module_.llvmType(operand.type);
                     const std::string first = next("str");
                     const std::string second = next("str");
+                    const std::string third = next("str");
                     out_ << "  " << first << " = insertvalue " << ty << " poison, ptr @" << global << ", 0\n";
                     out_ << "  " << second << " = insertvalue " << ty << ' ' << first << ", " << module_.usizeType()
                          << ' ' << length << ", 1\n";
-                    return {ty, second};
+                    out_ << "  " << third << " = insertvalue " << ty << ' ' << second << ", " << module_.usizeType()
+                         << " 0, 2\n";
+                    return {ty, third};
                 }
                 default:
                     throw std::runtime_error("LLVM codegen: unsupported literal type `" + operand.type.name() + "`");
@@ -491,6 +513,91 @@ void FunctionEmitter::store(mir::LocalId id, const Value& stored) {
         throw std::runtime_error("LLVM codegen: cannot store `" + stored.type + "` in local `" + destination.name + "` of type `" + expected + "`");
     }
     out_ << "  store " << stored.type << ' ' << stored.repr << ", ptr " << slot(id) << "\n";
+    if (!destination.type.isCopy() && !destination.type.isReference()) {
+        out_ << "  store i1 true, ptr " << dropFlag(id) << "\n";
+    }
+}
+
+void FunctionEmitter::markMoved(const mir::Operand& operand) {
+    if (operand.kind != mir::OperandKind::Local || operand.type.isCopy() || operand.type.isReference()) return;
+    out_ << "  store i1 false, ptr " << dropFlag(operand.local) << "\n";
+}
+
+void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& pointer) {
+    using sema::TypeKind;
+    switch (type.kind) {
+        case TypeKind::String: {
+            const std::string loaded = next("dropstr");
+            const std::string data = next("dropdata");
+            const std::string cap = next("dropcap");
+            const std::string owned = next("owned");
+            const std::string do_label = nextLabel("drop.str.do.");
+            const std::string end_label = nextLabel("drop.str.end.");
+            out_ << "  " << loaded << " = load %nus.string, ptr " << pointer << "\n";
+            out_ << "  " << data << " = extractvalue %nus.string " << loaded << ", 0\n";
+            out_ << "  " << cap << " = extractvalue %nus.string " << loaded << ", 2\n";
+            out_ << "  " << owned << " = icmp ne " << module_.usizeType() << ' ' << cap << ", 0\n";
+            out_ << "  br i1 " << owned << ", label %" << do_label << ", label %" << end_label << "\n";
+            out_ << do_label << ":\n";
+            out_ << "  call void @free(ptr " << data << ")\n";
+            out_ << "  br label %" << end_label << "\n";
+            out_ << end_label << ":\n";
+            break;
+        }
+        case TypeKind::Vec: {
+            const std::string loaded = next("dropvec");
+            const std::string data = next("dropdata");
+            out_ << "  " << loaded << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
+            out_ << "  " << data << " = extractvalue " << module_.llvmType(type) << ' ' << loaded << ", 0\n";
+            out_ << "  call void @free(ptr " << data << ")\n";
+            break;
+        }
+        case TypeKind::Struct: {
+            const auto& definition = module_.structure(type.nominal_name);
+            for (std::size_t i = 0; i < definition.fields.size(); ++i) {
+                const auto& field = definition.fields[i];
+                if (field.type.isCopy() || field.type.isReference()) continue;
+                const std::string field_ptr = next("dropfield");
+                out_ << "  " << field_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer
+                     << ", i32 0, i32 " << i << "\n";
+                emitDestroy(field.type, field_ptr);
+            }
+            break;
+        }
+        case TypeKind::Array: {
+            if (!type.element || !type.array_length || type.element->isCopy() || type.element->isReference()) break;
+            for (std::size_t i = 0; i < *type.array_length; ++i) {
+                const std::string element_ptr = next("dropelem");
+                out_ << "  " << element_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer
+                     << ", i64 0, i64 " << i << "\n";
+                emitDestroy(*type.element, element_ptr);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void FunctionEmitter::emitDrop(const mir::Instruction& inst, bool conditional) {
+    if (inst.operands.empty() || inst.operands.front().kind != mir::OperandKind::Local) return;
+    const auto& operand = inst.operands.front();
+    const auto& dropped = local(operand.local);
+    if (conditional) {
+        const std::string flag = next("dropflag");
+        const std::string do_label = nextLabel("drop.do.");
+        const std::string end_label = nextLabel("drop.end.");
+        out_ << "  " << flag << " = load i1, ptr " << dropFlag(dropped.id) << "\n";
+        out_ << "  br i1 " << flag << ", label %" << do_label << ", label %" << end_label << "\n";
+        out_ << do_label << ":\n";
+        emitDestroy(dropped.type, slot(dropped.id));
+        out_ << "  store i1 false, ptr " << dropFlag(dropped.id) << "\n";
+        out_ << "  br label %" << end_label << "\n";
+        out_ << end_label << ":\n";
+        return;
+    }
+    emitDestroy(dropped.type, slot(dropped.id));
+    out_ << "  store i1 false, ptr " << dropFlag(dropped.id) << "\n";
 }
 
 std::string FunctionEmitter::objectPointer(const mir::Operand& operand, sema::Type& base_type) {
@@ -627,6 +734,115 @@ void FunctionEmitter::builtinPrint(const std::vector<mir::Operand>& arguments) {
     out_ << "  call i32 (ptr, ...) @printf(ptr @.nus.newline)\n";
 }
 
+void FunctionEmitter::builtinStringClone(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: string_clone expects one argument");
+    const Value reference = value(arguments.front());
+    const std::string source = next("strsrc");
+    const std::string data = next("strdata");
+    const std::string length = next("strlen");
+    const std::string bytes = next("strbytes");
+    const std::string allocated = next("stralloc");
+    const std::string terminator = next("strterm");
+    out_ << "  " << source << " = load %nus.string, ptr " << reference.repr << "\n";
+    out_ << "  " << data << " = extractvalue %nus.string " << source << ", 0\n";
+    out_ << "  " << length << " = extractvalue %nus.string " << source << ", 1\n";
+    out_ << "  " << bytes << " = add " << module_.usizeType() << ' ' << length << ", 1\n";
+    out_ << "  " << allocated << " = call ptr @malloc(" << module_.usizeType() << ' ' << bytes << ")\n";
+    out_ << "  call ptr @memcpy(ptr " << allocated << ", ptr " << data << ", " << module_.usizeType() << ' ' << length << ")\n";
+    out_ << "  " << terminator << " = getelementptr inbounds i8, ptr " << allocated << ", " << module_.usizeType() << ' ' << length << "\n";
+    out_ << "  store i8 0, ptr " << terminator << "\n";
+    const std::string one = next("string");
+    const std::string two = next("string");
+    const std::string three = next("string");
+    out_ << "  " << one << " = insertvalue %nus.string poison, ptr " << allocated << ", 0\n";
+    out_ << "  " << two << " = insertvalue %nus.string " << one << ", " << module_.usizeType() << ' ' << length << ", 1\n";
+    out_ << "  " << three << " = insertvalue %nus.string " << two << ", " << module_.usizeType() << ' ' << bytes << ", 2\n";
+    store(*inst.destination, {"%nus.string", three});
+}
+
+void FunctionEmitter::builtinStringLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: string_len expects one argument");
+    const Value reference = value(arguments.front());
+    const std::string source = next("strsrc");
+    const std::string length = next("strlen");
+    out_ << "  " << source << " = load %nus.string, ptr " << reference.repr << "\n";
+    out_ << "  " << length << " = extractvalue %nus.string " << source << ", 1\n";
+    store(*inst.destination, {module_.usizeType(), length});
+}
+
+void FunctionEmitter::builtinVecNewI32(const mir::Instruction& inst) {
+    if (!inst.destination) throw std::runtime_error("LLVM codegen: vec_new_i32 requires a destination");
+    const std::string type = module_.llvmType(local(*inst.destination).type);
+    const std::string one = next("vec");
+    const std::string two = next("vec");
+    const std::string three = next("vec");
+    out_ << "  " << one << " = insertvalue " << type << " poison, ptr null, 0\n";
+    out_ << "  " << two << " = insertvalue " << type << ' ' << one << ", " << module_.usizeType() << " 0, 1\n";
+    out_ << "  " << three << " = insertvalue " << type << ' ' << two << ", " << module_.usizeType() << " 0, 2\n";
+    store(*inst.destination, {type, three});
+}
+
+void FunctionEmitter::builtinVecPushI32(const std::vector<mir::Operand>& arguments) {
+    if (arguments.size() != 2) throw std::runtime_error("LLVM codegen: vec_push_i32 expects two arguments");
+    const Value reference = value(arguments[0]);
+    const std::string type = module_.llvmType(sema::Type::vector(sema::Type::simple(sema::TypeKind::I32)));
+    const std::string aggregate = next("vec");
+    const std::string data = next("vecdata");
+    const std::string length = next("veclen");
+    const std::string new_length = next("veclen");
+    const std::string bytes = next("vecbytes");
+    const std::string allocated = next("vecalloc");
+    const std::string element = next("vecelem");
+    out_ << "  " << aggregate << " = load " << type << ", ptr " << reference.repr << "\n";
+    out_ << "  " << data << " = extractvalue " << type << ' ' << aggregate << ", 0\n";
+    out_ << "  " << length << " = extractvalue " << type << ' ' << aggregate << ", 1\n";
+    out_ << "  " << new_length << " = add " << module_.usizeType() << ' ' << length << ", 1\n";
+    out_ << "  " << bytes << " = mul " << module_.usizeType() << ' ' << new_length << ", 4\n";
+    out_ << "  " << allocated << " = call ptr @realloc(ptr " << data << ", " << module_.usizeType() << ' ' << bytes << ")\n";
+    out_ << "  " << element << " = getelementptr inbounds i32, ptr " << allocated << ", " << module_.usizeType() << ' ' << length << "\n";
+    const Value inserted = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::I32));
+    out_ << "  store i32 " << inserted.repr << ", ptr " << element << "\n";
+    const std::string one = next("vec");
+    const std::string two = next("vec");
+    const std::string three = next("vec");
+    out_ << "  " << one << " = insertvalue " << type << ' ' << aggregate << ", ptr " << allocated << ", 0\n";
+    out_ << "  " << two << " = insertvalue " << type << ' ' << one << ", " << module_.usizeType() << ' ' << new_length << ", 1\n";
+    out_ << "  " << three << " = insertvalue " << type << ' ' << two << ", " << module_.usizeType() << ' ' << new_length << ", 2\n";
+    out_ << "  store " << type << ' ' << three << ", ptr " << reference.repr << "\n";
+}
+
+void FunctionEmitter::builtinVecLenI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: vec_len_i32 expects one argument");
+    const Value reference = value(arguments.front());
+    const std::string type = module_.llvmType(sema::Type::vector(sema::Type::simple(sema::TypeKind::I32)));
+    const std::string aggregate = next("vec");
+    const std::string length = next("veclen");
+    out_ << "  " << aggregate << " = load " << type << ", ptr " << reference.repr << "\n";
+    out_ << "  " << length << " = extractvalue " << type << ' ' << aggregate << ", 1\n";
+    store(*inst.destination, {module_.usizeType(), length});
+}
+
+void FunctionEmitter::builtinVecGetI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: vec_get_i32 expects two arguments");
+    const Value reference = value(arguments[0]);
+    const Value index = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::USize));
+    const std::string type = module_.llvmType(sema::Type::vector(sema::Type::simple(sema::TypeKind::I32)));
+    const std::string aggregate = next("vec");
+    const std::string data = next("vecdata");
+    const std::string length = next("veclen");
+    const std::string in_bounds = next("bounds");
+    const std::string element = next("vecelem");
+    const std::string loaded = next("vecvalue");
+    out_ << "  " << aggregate << " = load " << type << ", ptr " << reference.repr << "\n";
+    out_ << "  " << data << " = extractvalue " << type << ' ' << aggregate << ", 0\n";
+    out_ << "  " << length << " = extractvalue " << type << ' ' << aggregate << ", 1\n";
+    out_ << "  " << in_bounds << " = icmp ult " << module_.usizeType() << ' ' << index.repr << ", " << length << "\n";
+    out_ << "  call void @nus_assert(i1 " << in_bounds << ")\n";
+    out_ << "  " << element << " = getelementptr inbounds i32, ptr " << data << ", " << module_.usizeType() << ' ' << index.repr << "\n";
+    out_ << "  " << loaded << " = load i32, ptr " << element << "\n";
+    store(*inst.destination, {"i32", loaded});
+}
+
 void FunctionEmitter::instruction(const mir::Instruction& inst) {
     using mir::InstructionKind;
     switch (inst.kind) {
@@ -634,7 +850,11 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (!inst.destination || inst.operands.empty()) return;
             const auto& source = inst.operands.front();
             const auto& destination = local(*inst.destination);
-            store(*inst.destination, coerce(value(source), source.type, destination.type));
+            const Value moved = coerce(value(source), source.type, destination.type);
+            store(*inst.destination, moved);
+            if (source.kind == mir::OperandKind::Local && source.local != *inst.destination && !source.type.isCopy() && !source.type.isReference()) {
+                markMoved(source);
+            }
             break;
         }
         case InstructionKind::Borrow: {
@@ -724,6 +944,12 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 out_ << "  call void @nus_assert(i1 " << condition.repr << ")\n";
                 return;
             }
+            if (callee.text == "string_clone") { builtinStringClone(inst, arguments); return; }
+            if (callee.text == "string_len") { builtinStringLen(inst, arguments); return; }
+            if (callee.text == "vec_new_i32") { builtinVecNewI32(inst); return; }
+            if (callee.text == "vec_push_i32") { builtinVecPushI32(arguments); return; }
+            if (callee.text == "vec_len_i32") { builtinVecLenI32(inst, arguments); return; }
+            if (callee.text == "vec_get_i32") { builtinVecGetI32(inst, arguments); return; }
             std::vector<Value> values;
             values.reserve(arguments.size());
             for (std::size_t i = 0; i < arguments.size(); ++i) {
@@ -750,6 +976,11 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 const std::string result = next("call");
                 out_ << "  " << result << " = " << call.str() << "\n";
                 store(*inst.destination, {llvm_return, result});
+            }
+            if (callee.type.kind == sema::TypeKind::Function) {
+                for (std::size_t i = 0; i < arguments.size() && i < callee.type.parameters.size(); ++i) {
+                    if (!callee.type.parameters[i].isReference() && !arguments[i].type.isCopy()) markMoved(arguments[i]);
+                }
             }
             break;
         }
@@ -826,6 +1057,7 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 aggregate = inserted;
             }
             store(*inst.destination, {module_.llvmType(destination.type), aggregate});
+            for (const auto& operand : inst.operands) if (!operand.type.isCopy() && !operand.type.isReference()) markMoved(operand);
             break;
         }
         case InstructionKind::MakeArray: {
@@ -853,6 +1085,7 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 aggregate = inserted;
             }
             store(*inst.destination, {array_type, aggregate});
+            for (const auto& operand : inst.operands) if (!operand.type.isCopy() && !operand.type.isReference()) markMoved(operand);
             break;
         }
         case InstructionKind::MakeRange: {
@@ -917,10 +1150,10 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             break;
         }
         case InstructionKind::Drop:
-            out_ << "  ; drop `" << inst.name << "` is currently trivial in the native backend\n";
+            emitDrop(inst, false);
             break;
         case InstructionKind::DropIf:
-            out_ << "  ; conditional drop `" << inst.name << "` is currently trivial in the native backend\n";
+            emitDrop(inst, true);
             break;
     }
 }
@@ -965,9 +1198,16 @@ void FunctionEmitter::emit() {
     for (const auto& local : function_.locals) {
         if (local.type.isUnit()) continue;
         out_ << "  " << slot(local.id) << " = alloca " << module_.llvmType(local.type) << "\n";
+        if (!local.type.isCopy() && !local.type.isReference()) {
+            out_ << "  " << dropFlag(local.id) << " = alloca i1\n";
+            out_ << "  store i1 false, ptr " << dropFlag(local.id) << "\n";
+        }
     }
     for (std::size_t i = 0; i < parameters.size(); ++i) {
         out_ << "  store " << module_.llvmType(parameters[i]->type) << " %arg" << i << ", ptr " << slot(parameters[i]->id) << "\n";
+        if (!parameters[i]->type.isCopy() && !parameters[i]->type.isReference()) {
+            out_ << "  store i1 true, ptr " << dropFlag(parameters[i]->id) << "\n";
+        }
     }
     out_ << "  br label %bb" << function_.entry << "\n";
 
