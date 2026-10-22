@@ -44,6 +44,24 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::Function: return {pointer, pointer};
         case TypeKind::String:
         case TypeKind::Vec: return {pointer * 3U, pointer};
+        case TypeKind::Option: {
+            if (!type.element) throw std::runtime_error("layout: malformed Option");
+            const auto payload = layoutOf(*type.element);
+            const std::size_t offset = alignTo(1, payload.alignment);
+            return {alignTo(offset + payload.size, payload.alignment), payload.alignment};
+        }
+        case TypeKind::Result: {
+            if (type.generic_arguments.size() != 2) throw std::runtime_error("layout: malformed Result");
+            const auto ok = layoutOf(type.generic_arguments[0]);
+            const auto err = layoutOf(type.generic_arguments[1]);
+            const std::size_t alignment = std::max({std::size_t{1}, ok.alignment, err.alignment});
+            std::size_t size = 1;
+            size = alignTo(size, ok.alignment) + ok.size;
+            size = alignTo(size, err.alignment) + err.size;
+            return {alignTo(size, alignment), alignment};
+        }
+        case TypeKind::TypeParameter:
+            throw std::runtime_error("layout: unmonomorphized type parameter `" + type.name() + "`");
         case TypeKind::Bytes:
         case TypeKind::Slice: return {pointer * 2U, pointer};
         case TypeKind::Range: {
