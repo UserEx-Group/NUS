@@ -6,11 +6,10 @@ namespace nus::codegen {
 
 TargetInfo TargetInfo::host() {
     TargetInfo target;
-#if defined(_WIN32) && defined(_M_X64)
+#if defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
     target.triple = "x86_64-w64-windows-gnu";
-    target.pointer_bits = 64;
 #elif defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
-    target.triple = "aarch64-pc-windows-msvc";
+    target.triple = "aarch64-w64-windows-gnu";
 #elif defined(__APPLE__) && defined(__aarch64__)
     target.triple = "arm64-apple-darwin";
 #elif defined(__APPLE__) && defined(__x86_64__)
