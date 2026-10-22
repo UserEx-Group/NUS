@@ -41,6 +41,7 @@ Program HirBuilder::lower(const ast::SourceFile& file) {
     struct_types_.clear();
     method_receivers_.clear();
     for (const auto& implementation : file.impls) {
+        if (implementation.trait) continue;
         const std::string owner = implementation.target.name();
         for (const auto& method : implementation.methods) {
             ReceiverMode mode = ReceiverMode::None;
@@ -72,25 +73,35 @@ Program HirBuilder::lower(const ast::SourceFile& file) {
     }
 
     for (const auto& function : file.functions) {
-        program.functions.push_back(lowerFunction(function));
+        if (function.generic_parameters.empty()) program.functions.push_back(lowerFunction(function));
     }
     for (const auto& implementation : file.impls) {
+        if (implementation.trait) continue;
         const std::string owner = implementation.target.name();
         for (const auto& method : implementation.methods) {
             program.functions.push_back(lowerFunction(method, owner));
         }
     }
+    for (const auto& instantiation : semantic_.genericInstantiations()) {
+        if (!instantiation.declaration || instantiation.builtin) continue;
+        std::unordered_map<std::string, sema::Type> substitutions;
+        for (const auto& [name, type] : instantiation.substitutions) substitutions.emplace(name, type);
+        program.functions.push_back(lowerFunction(*instantiation.declaration, {}, instantiation.symbol_name, std::move(substitutions)));
+    }
     return program;
 }
 
-Function HirBuilder::lowerFunction(const ast::FunctionDecl& function, std::string owner_type) {
+Function HirBuilder::lowerFunction(const ast::FunctionDecl& function, std::string owner_type,
+                                   std::string symbol_name,
+                                   std::unordered_map<std::string, sema::Type> substitutions) {
     scopes_.clear();
     locals_.clear();
     next_local_ = 0;
+    type_substitutions_ = std::move(substitutions);
     pushScope();
 
     Function lowered;
-    lowered.name = function.name;
+    lowered.name = symbol_name.empty() ? function.name : std::move(symbol_name);
     lowered.owner_type = std::move(owner_type);
     lowered.span = function.span;
     lowered.return_type = function.return_type ? lowerTypeRef(*function.return_type) : unitType();
@@ -172,7 +183,12 @@ ExprPtr HirBuilder::lowerExpr(const ast::Expr& expression) {
         case ast::ExprKind::Call: {
             const auto& node = static_cast<const ast::CallExpr&>(expression);
             result->kind = ExprKind::Call;
-            result->operands.push_back(lowerExpr(*node.callee));
+            auto callee = lowerExpr(*node.callee);
+            if (const auto* target = semantic_.resolvedCallTarget(node); target && callee->kind == ExprKind::Global) {
+                callee->text = *target;
+                if (const auto* resolved = semantic_.typeOf(*node.callee)) callee->type = substituteType(*resolved);
+            }
+            result->operands.push_back(std::move(callee));
             for (const auto& argument : node.arguments) result->operands.push_back(lowerExpr(*argument));
             break;
         }
@@ -340,8 +356,14 @@ sema::Type HirBuilder::lowerTypeRef(const ast::TypeRef& type) const {
         return joined;
     }();
     sema::Type base = primitiveType(name);
-    if (name == "Vec" && type.generic_arguments.size() == 1) {
+    if (const auto found = type_substitutions_.find(name); found != type_substitutions_.end()) {
+        base = found->second;
+    } else if (name == "Vec" && type.generic_arguments.size() == 1) {
         base = sema::Type::vector(lowerTypeRef(type.generic_arguments.front()));
+    } else if (name == "Option" && type.generic_arguments.size() == 1) {
+        base = sema::Type::option(lowerTypeRef(type.generic_arguments.front()));
+    } else if (name == "Result" && type.generic_arguments.size() == 2) {
+        base = sema::Type::result(lowerTypeRef(type.generic_arguments[0]), lowerTypeRef(type.generic_arguments[1]));
     } else if (base.kind == sema::TypeKind::Unknown) {
         base = sema::Type::structure(name);
     }
@@ -349,8 +371,30 @@ sema::Type HirBuilder::lowerTypeRef(const ast::TypeRef& type) const {
     return base;
 }
 
+sema::Type HirBuilder::substituteType(const sema::Type& type) const {
+    if (type.kind == sema::TypeKind::TypeParameter) {
+        const auto found = type_substitutions_.find(type.nominal_name);
+        return found == type_substitutions_.end() ? type : found->second;
+    }
+    if (type.kind == sema::TypeKind::Reference && type.element) return sema::Type::reference(substituteType(*type.element), type.mutable_reference);
+    if (type.kind == sema::TypeKind::Vec && type.element) return sema::Type::vector(substituteType(*type.element));
+    if (type.kind == sema::TypeKind::Option && type.element) return sema::Type::option(substituteType(*type.element));
+    if (type.kind == sema::TypeKind::Array && type.element) return sema::Type::array(substituteType(*type.element), type.array_length);
+    if (type.kind == sema::TypeKind::Slice && type.element) return sema::Type::slice(substituteType(*type.element));
+    if (type.kind == sema::TypeKind::Range && type.element) return sema::Type::range(substituteType(*type.element));
+    if (type.kind == sema::TypeKind::Result && type.generic_arguments.size() == 2) {
+        return sema::Type::result(substituteType(type.generic_arguments[0]), substituteType(type.generic_arguments[1]));
+    }
+    if (type.kind == sema::TypeKind::Function) {
+        std::vector<sema::Type> parameters;
+        for (const auto& parameter : type.parameters) parameters.push_back(substituteType(parameter));
+        return sema::Type::function(std::move(parameters), type.return_type ? substituteType(*type.return_type) : unitType(), type.variadic_any);
+    }
+    return type;
+}
+
 sema::Type HirBuilder::expressionType(const ast::Expr& expression) const {
-    if (const auto* type = semantic_.typeOf(expression)) return *type;
+    if (const auto* type = semantic_.typeOf(expression)) return substituteType(*type);
     return unknownType();
 }
 

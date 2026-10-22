@@ -17,12 +17,15 @@ public:
     [[nodiscard]] Program lower(const ast::SourceFile& file);
 
 private:
-    [[nodiscard]] Function lowerFunction(const ast::FunctionDecl& function, std::string owner_type = {});
+    [[nodiscard]] Function lowerFunction(const ast::FunctionDecl& function, std::string owner_type = {},
+                                         std::string symbol_name = {},
+                                         std::unordered_map<std::string, sema::Type> substitutions = {});
     [[nodiscard]] ExprPtr lowerExpr(const ast::Expr& expression);
     [[nodiscard]] StmtPtr lowerStmt(const ast::Stmt& statement);
     [[nodiscard]] ExprPtr lowerBlock(const ast::BlockExpr& block, bool create_scope = true);
     [[nodiscard]] sema::Type lowerTypeRef(const ast::TypeRef& type) const;
     [[nodiscard]] sema::Type expressionType(const ast::Expr& expression) const;
+    [[nodiscard]] sema::Type substituteType(const sema::Type& type) const;
 
     void pushScope();
     void popScope();
@@ -36,6 +39,7 @@ private:
     LocalId next_local_{0};
     std::unordered_map<std::string, sema::Type> struct_types_;
     std::unordered_map<std::string, ReceiverMode> method_receivers_;
+    std::unordered_map<std::string, sema::Type> type_substitutions_;
 };
 
 } // namespace nus::hir
