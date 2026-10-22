@@ -1,4 +1,5 @@
 #include "nus/ast/AstPrinter.hpp"
+#include "nus/codegen/Layout.hpp"
 #include "nus/codegen/LlvmEmitter.hpp"
 #include "nus/codegen/NativeToolchain.hpp"
 #include "nus/codegen/TargetInfo.hpp"
@@ -34,7 +35,7 @@ void printDiagnostic(const nus::SourceManager& sources, const nus::Diagnostic& d
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "usage: nusc <file.nus> [--tokens|--check|--hir|--mir|--flow|--emit-llvm|--build]\n";
+        std::cerr << "usage: nusc <file.nus> [--tokens|--check|--hir|--mir|--flow|--layout|--emit-llvm|--build]\n";
         return 2;
     }
 
@@ -44,9 +45,10 @@ int main(int argc, char** argv) {
     const bool hir_only = option == "--hir";
     const bool mir_only = option == "--mir";
     const bool flow_only = option == "--flow";
+    const bool layout_only = option == "--layout";
     const bool emit_llvm = option == "--emit-llvm";
     const bool build_native = option == "--build";
-    if (argc == 3 && !tokens_only && !check_only && !hir_only && !mir_only && !flow_only && !emit_llvm && !build_native) {
+    if (argc == 3 && !tokens_only && !check_only && !hir_only && !mir_only && !flow_only && !layout_only && !emit_llvm && !build_native) {
         std::cerr << "nusc: unknown option `" << argv[2] << "`\n";
         return 2;
     }
@@ -108,6 +110,25 @@ int main(int argc, char** argv) {
         if (flow_only) {
             nus::mir::FlowPrinter printer;
             std::cout << printer.print(mir, flow);
+            return 0;
+        }
+        if (layout_only) {
+            const auto target = nus::codegen::TargetInfo::host();
+            const nus::codegen::LayoutEngine layouts(mir, target);
+            const auto string_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::String));
+            const auto vec_layout = layouts.layoutOf(nus::sema::Type::vector(nus::sema::Type::simple(nus::sema::TypeKind::I32)));
+            std::cout << "target " << target.description() << '\n';
+            std::cout << "string size=" << string_layout.size << " align=" << string_layout.alignment << '\n';
+            std::cout << "Vec<i32> size=" << vec_layout.size << " align=" << vec_layout.alignment << '\n';
+            for (const auto& structure : mir.structs) {
+                const auto layout = layouts.layoutOfStruct(structure.name);
+                std::cout << "struct " << layout.name << " size=" << layout.layout.size
+                          << " align=" << layout.layout.alignment << '\n';
+                for (const auto& field : layout.fields) {
+                    std::cout << "  " << field.name << " offset=" << field.offset
+                              << " size=" << field.layout.size << " align=" << field.layout.alignment << '\n';
+                }
+            }
             return 0;
         }
         if (mir_only) {
