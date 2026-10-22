@@ -40,6 +40,13 @@ Type Type::range(Type element_type) {
     return type;
 }
 
+Type Type::vector(Type element_type) {
+    Type type;
+    type.kind = TypeKind::Vec;
+    type.element = std::make_shared<Type>(std::move(element_type));
+    return type;
+}
+
 Type Type::reference(Type element_type, bool is_mutable) {
     Type type;
     type.kind = TypeKind::Reference;
@@ -146,6 +153,7 @@ bool Type::isCopy() const noexcept {
             return element && element->isCopy();
         case TypeKind::String:
         case TypeKind::Bytes:
+        case TypeKind::Vec:
         case TypeKind::Struct:
             return false;
     }
@@ -154,7 +162,7 @@ bool Type::isCopy() const noexcept {
 
 bool Type::containsReference() const noexcept {
     if (kind == TypeKind::Reference) return true;
-    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range) && element) {
+    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec) && element) {
         return element->containsReference();
     }
     if (kind == TypeKind::Function) {
@@ -187,6 +195,8 @@ std::string Type::name() const {
         case TypeKind::Char: return "char";
         case TypeKind::String: return "string";
         case TypeKind::Bytes: return "bytes";
+        case TypeKind::Vec:
+            return "Vec<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Struct: return nominal_name.empty() ? "<anonymous struct>" : nominal_name;
         case TypeKind::Array: {
             const std::string element_name = element ? element->name() : "<unknown>";
@@ -229,6 +239,7 @@ bool operator==(const Type& lhs, const Type& rhs) {
             [[fallthrough]];
         case TypeKind::Slice:
         case TypeKind::Range:
+        case TypeKind::Vec:
             if (!lhs.element || !rhs.element) return lhs.element == rhs.element;
             return *lhs.element == *rhs.element;
         case TypeKind::Reference:

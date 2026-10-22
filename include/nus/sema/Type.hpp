@@ -27,6 +27,7 @@ enum class TypeKind {
     Char,
     String,
     Bytes,
+    Vec,
     Struct,
     Array,
     Slice,
@@ -50,6 +51,7 @@ struct Type {
     [[nodiscard]] static Type array(Type element, std::optional<std::size_t> length = std::nullopt);
     [[nodiscard]] static Type slice(Type element);
     [[nodiscard]] static Type range(Type element);
+    [[nodiscard]] static Type vector(Type element);
     [[nodiscard]] static Type reference(Type element, bool is_mutable = false);
     [[nodiscard]] static Type function(std::vector<Type> parameters, Type result, bool variadic_any = false);
 
