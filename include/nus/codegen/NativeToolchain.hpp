@@ -17,6 +17,7 @@ class NativeToolchain {
 public:
     [[nodiscard]] static std::string clangExecutable();
     [[nodiscard]] static bool clangAvailable();
+    [[nodiscard]] static std::string mingwRoot();
     [[nodiscard]] NativeBuildResult build(const std::string& llvm_ir,
                                           const std::filesystem::path& output) const;
 };
