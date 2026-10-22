@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.9.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.10.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,6 +24,7 @@ add_library(nus_frontend
     src/mir/DropElaborator.cpp
     src/mir/FlowPrinter.cpp
     src/codegen/TargetInfo.cpp
+    src/codegen/Layout.cpp
     src/codegen/LlvmEmitter.cpp
     src/codegen/NativeToolchain.cpp
 )
@@ -79,3 +80,11 @@ add_test(NAME codegen COMMAND nus_codegen_tests)
 add_executable(nus_native_tests tests/NativeTests.cpp)
 target_link_libraries(nus_native_tests PRIVATE nus_frontend)
 add_test(NAME native COMMAND nus_native_tests)
+
+add_executable(nus_layout_tests tests/LayoutTests.cpp)
+target_link_libraries(nus_layout_tests PRIVATE nus_frontend)
+add_test(NAME layout COMMAND nus_layout_tests)
+
+add_executable(nus_runtime_tests tests/RuntimeTests.cpp)
+target_link_libraries(nus_runtime_tests PRIVATE nus_frontend)
+add_test(NAME runtime COMMAND nus_runtime_tests)
