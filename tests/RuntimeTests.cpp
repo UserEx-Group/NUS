@@ -43,7 +43,6 @@ std::string compileIr(std::string_view source) {
     return nus::codegen::LlvmEmitter{}.emit(mir);
 }
 
-std::string quote(const std::filesystem::path& value) { return "\"" + value.string() + "\""; }
 }
 
 int main() {
@@ -87,25 +86,25 @@ int main() {
 #else
     const auto executable = base;
 #endif
-    const auto output = std::filesystem::path(base.string() + ".out");
-    const auto build = nus::codegen::NativeToolchain{}.build(ir, executable);
+    const nus::codegen::NativeToolchain toolchain;
+    const auto build = toolchain.build(ir, executable);
     if (!build.success) {
         std::cerr << build.message << '\n' << build.command << '\n';
         fail("runtime native toolchain failed");
     }
 
-    if (std::system((quote(executable) + " > " + quote(output)).c_str()) != 0) fail("runtime executable failed");
-    std::ifstream stream(output);
-    std::ostringstream contents;
-    contents << stream.rdbuf();
-    if (contents.str() != "7 network\nnetwork\n3 20\n") {
-        std::cerr << "runtime output was:\n" << contents.str();
+    const auto run = toolchain.run(executable);
+    if (!run.success) {
+        std::cerr << run.message << " (exit " << run.exit_code << ")\n";
+        fail("runtime executable failed");
+    }
+    if (run.stdout_text != "7 network\nnetwork\n3 20\n") {
+        std::cerr << "runtime output was:\n" << run.stdout_text;
         fail("runtime executable produced unexpected output");
     }
 
     std::error_code ec;
     std::filesystem::remove(executable, ec);
-    std::filesystem::remove(output, ec);
     std::cout << "runtime tests passed\n";
     return 0;
 }

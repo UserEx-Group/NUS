@@ -44,7 +44,6 @@ std::string compileIr(std::string_view source) {
     return nus::codegen::LlvmEmitter{}.emit(mir);
 }
 
-std::string quote(const std::filesystem::path& value) { return "\"" + value.string() + "\""; }
 
 } // namespace
 
@@ -85,7 +84,6 @@ int main() {
 #else
     const auto executable = base;
 #endif
-    const auto output = std::filesystem::path(base.string() + ".out");
     const nus::codegen::NativeToolchain toolchain;
     const auto build = toolchain.build(ir, executable);
     if (!build.success) {
@@ -93,20 +91,18 @@ int main() {
         fail("native toolchain failed to build LLVM IR");
     }
 
-    const std::string command = quote(executable) + " > " + quote(output);
-    if (std::system(command.c_str()) != 0) fail("native NUS executable returned failure");
-
-    std::ifstream stream(output);
-    std::ostringstream contents;
-    contents << stream.rdbuf();
-    if (contents.str() != "30\n64 20 1500\n") {
-        std::cerr << "native output was:\n" << contents.str();
+    const auto run = toolchain.run(executable);
+    if (!run.success) {
+        std::cerr << run.message << " (exit " << run.exit_code << ")\n";
+        fail("native NUS executable returned failure");
+    }
+    if (run.stdout_text != "30\n64 20 1500\n") {
+        std::cerr << "native output was:\n" << run.stdout_text;
         fail("native executable produced unexpected output");
     }
 
     std::error_code ec;
     std::filesystem::remove(executable, ec);
-    std::filesystem::remove(output, ec);
     std::cout << "native codegen tests passed\n";
     return 0;
 }
