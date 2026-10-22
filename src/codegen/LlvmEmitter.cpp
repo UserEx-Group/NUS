@@ -186,10 +186,10 @@ private:
     void emitDrop(const mir::Instruction& inst, bool conditional);
     void builtinStringClone(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinStringLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
-    void builtinVecNewI32(const mir::Instruction& inst);
-    void builtinVecPushI32(const std::vector<mir::Operand>& arguments);
-    void builtinVecLenI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
-    void builtinVecGetI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinVecNew(const mir::Instruction& inst);
+    void builtinVecPush(const std::vector<mir::Operand>& arguments);
+    void builtinVecLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinVecGet(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
 
     ModuleEmitter& module_;
     const mir::Function& function_;
@@ -207,7 +207,7 @@ public:
 
     std::string run() {
         std::ostringstream out;
-        out << "; NUS LLVM IR - milestone 10\n";
+        out << "; NUS LLVM IR - milestone 11\n";
         out << "; target: " << target_.description() << "\n";
         if (!target_.triple.empty()) out << "target triple = \"" << target_.triple << "\"\n";
         out << "\n";
@@ -249,6 +249,14 @@ public:
             case TypeKind::Vec:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Vec type");
                 return "{ ptr, " + usizeType() + ", " + usizeType() + " }";
+            case TypeKind::Option:
+                if (!type.element) throw std::runtime_error("LLVM codegen: malformed Option type");
+                return "{ i1, " + llvmType(*type.element) + " }";
+            case TypeKind::Result:
+                if (type.generic_arguments.size() != 2) throw std::runtime_error("LLVM codegen: malformed Result type");
+                return "{ i1, " + llvmType(type.generic_arguments[0]) + ", " + llvmType(type.generic_arguments[1]) + " }";
+            case TypeKind::TypeParameter:
+                throw std::runtime_error("LLVM codegen: unmonomorphized type parameter `" + type.name() + "`");
             case TypeKind::Struct: return structSymbol(type.nominal_name);
             case TypeKind::Array:
                 if (!type.element || !type.array_length) throw std::runtime_error("LLVM codegen: unsized array is not supported");
@@ -545,10 +553,38 @@ void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& poi
             break;
         }
         case TypeKind::Vec: {
+            if (!type.element) throw std::runtime_error("LLVM codegen: malformed Vec drop type");
             const std::string loaded = next("dropvec");
             const std::string data = next("dropdata");
+            const std::string length = next("droplen");
             out_ << "  " << loaded << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
             out_ << "  " << data << " = extractvalue " << module_.llvmType(type) << ' ' << loaded << ", 0\n";
+            out_ << "  " << length << " = extractvalue " << module_.llvmType(type) << ' ' << loaded << ", 1\n";
+            if (!type.element->isCopy() && !type.element->isReference()) {
+                const std::string index_slot = next("dropidxslot");
+                const std::string head = nextLabel("drop.vec.head.");
+                const std::string body = nextLabel("drop.vec.body.");
+                const std::string done = nextLabel("drop.vec.done.");
+                out_ << "  " << index_slot << " = alloca " << module_.usizeType() << "\n";
+                out_ << "  store " << module_.usizeType() << " 0, ptr " << index_slot << "\n";
+                out_ << "  br label %" << head << "\n";
+                out_ << head << ":\n";
+                const std::string index = next("dropidx");
+                const std::string cond = next("dropcond");
+                out_ << "  " << index << " = load " << module_.usizeType() << ", ptr " << index_slot << "\n";
+                out_ << "  " << cond << " = icmp ult " << module_.usizeType() << ' ' << index << ", " << length << "\n";
+                out_ << "  br i1 " << cond << ", label %" << body << ", label %" << done << "\n";
+                out_ << body << ":\n";
+                const std::string element_ptr = next("dropvecelem");
+                out_ << "  " << element_ptr << " = getelementptr inbounds " << module_.llvmType(*type.element)
+                     << ", ptr " << data << ", " << module_.usizeType() << ' ' << index << "\n";
+                emitDestroy(*type.element, element_ptr);
+                const std::string next_index = next("dropidx");
+                out_ << "  " << next_index << " = add " << module_.usizeType() << ' ' << index << ", 1\n";
+                out_ << "  store " << module_.usizeType() << ' ' << next_index << ", ptr " << index_slot << "\n";
+                out_ << "  br label %" << head << "\n";
+                out_ << done << ":\n";
+            }
             out_ << "  call void @free(ptr " << data << ")\n";
             break;
         }
@@ -770,8 +806,8 @@ void FunctionEmitter::builtinStringLen(const mir::Instruction& inst, const std::
     store(*inst.destination, {module_.usizeType(), length});
 }
 
-void FunctionEmitter::builtinVecNewI32(const mir::Instruction& inst) {
-    if (!inst.destination) throw std::runtime_error("LLVM codegen: vec_new_i32 requires a destination");
+void FunctionEmitter::builtinVecNew(const mir::Instruction& inst) {
+    if (!inst.destination) throw std::runtime_error("LLVM codegen: vec_new requires a destination");
     const std::string type = module_.llvmType(local(*inst.destination).type);
     const std::string one = next("vec");
     const std::string two = next("vec");
@@ -782,14 +818,22 @@ void FunctionEmitter::builtinVecNewI32(const mir::Instruction& inst) {
     store(*inst.destination, {type, three});
 }
 
-void FunctionEmitter::builtinVecPushI32(const std::vector<mir::Operand>& arguments) {
-    if (arguments.size() != 2) throw std::runtime_error("LLVM codegen: vec_push_i32 expects two arguments");
+void FunctionEmitter::builtinVecPush(const std::vector<mir::Operand>& arguments) {
+    if (arguments.size() != 2) throw std::runtime_error("LLVM codegen: vec_push expects two arguments");
     const Value reference = value(arguments[0]);
-    const std::string type = module_.llvmType(sema::Type::vector(sema::Type::simple(sema::TypeKind::I32)));
+    if (arguments[0].type.kind != sema::TypeKind::Reference || !arguments[0].type.element ||
+        arguments[0].type.element->kind != sema::TypeKind::Vec || !arguments[0].type.element->element) {
+        throw std::runtime_error("LLVM codegen: vec_push requires &mut Vec<T>");
+    }
+    const sema::Type element_type = *arguments[0].type.element->element;
+    const std::string element_llvm = module_.llvmType(element_type);
+    const std::string type = module_.llvmType(*arguments[0].type.element);
     const std::string aggregate = next("vec");
     const std::string data = next("vecdata");
     const std::string length = next("veclen");
     const std::string new_length = next("veclen");
+    const std::string size_ptr = next("vecsizeptr");
+    const std::string element_size = next("vecsize");
     const std::string bytes = next("vecbytes");
     const std::string allocated = next("vecalloc");
     const std::string element = next("vecelem");
@@ -797,11 +841,13 @@ void FunctionEmitter::builtinVecPushI32(const std::vector<mir::Operand>& argumen
     out_ << "  " << data << " = extractvalue " << type << ' ' << aggregate << ", 0\n";
     out_ << "  " << length << " = extractvalue " << type << ' ' << aggregate << ", 1\n";
     out_ << "  " << new_length << " = add " << module_.usizeType() << ' ' << length << ", 1\n";
-    out_ << "  " << bytes << " = mul " << module_.usizeType() << ' ' << new_length << ", 4\n";
+    out_ << "  " << size_ptr << " = getelementptr " << element_llvm << ", ptr null, i32 1\n";
+    out_ << "  " << element_size << " = ptrtoint ptr " << size_ptr << " to " << module_.usizeType() << "\n";
+    out_ << "  " << bytes << " = mul " << module_.usizeType() << ' ' << new_length << ", " << element_size << "\n";
     out_ << "  " << allocated << " = call ptr @realloc(ptr " << data << ", " << module_.usizeType() << ' ' << bytes << ")\n";
-    out_ << "  " << element << " = getelementptr inbounds i32, ptr " << allocated << ", " << module_.usizeType() << ' ' << length << "\n";
-    const Value inserted = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::I32));
-    out_ << "  store i32 " << inserted.repr << ", ptr " << element << "\n";
+    out_ << "  " << element << " = getelementptr inbounds " << element_llvm << ", ptr " << allocated << ", " << module_.usizeType() << ' ' << length << "\n";
+    const Value inserted = coerce(value(arguments[1]), arguments[1].type, element_type);
+    out_ << "  store " << element_llvm << ' ' << inserted.repr << ", ptr " << element << "\n";
     const std::string one = next("vec");
     const std::string two = next("vec");
     const std::string three = next("vec");
@@ -811,10 +857,13 @@ void FunctionEmitter::builtinVecPushI32(const std::vector<mir::Operand>& argumen
     out_ << "  store " << type << ' ' << three << ", ptr " << reference.repr << "\n";
 }
 
-void FunctionEmitter::builtinVecLenI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
-    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: vec_len_i32 expects one argument");
+void FunctionEmitter::builtinVecLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: vec_len expects one argument");
     const Value reference = value(arguments.front());
-    const std::string type = module_.llvmType(sema::Type::vector(sema::Type::simple(sema::TypeKind::I32)));
+    if (arguments[0].type.kind != sema::TypeKind::Reference || !arguments[0].type.element || arguments[0].type.element->kind != sema::TypeKind::Vec) {
+        throw std::runtime_error("LLVM codegen: vec_len requires &Vec<T>");
+    }
+    const std::string type = module_.llvmType(*arguments[0].type.element);
     const std::string aggregate = next("vec");
     const std::string length = next("veclen");
     out_ << "  " << aggregate << " = load " << type << ", ptr " << reference.repr << "\n";
@@ -822,11 +871,17 @@ void FunctionEmitter::builtinVecLenI32(const mir::Instruction& inst, const std::
     store(*inst.destination, {module_.usizeType(), length});
 }
 
-void FunctionEmitter::builtinVecGetI32(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
-    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: vec_get_i32 expects two arguments");
+void FunctionEmitter::builtinVecGet(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: vec_get expects two arguments");
     const Value reference = value(arguments[0]);
     const Value index = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::USize));
-    const std::string type = module_.llvmType(sema::Type::vector(sema::Type::simple(sema::TypeKind::I32)));
+    if (arguments[0].type.kind != sema::TypeKind::Reference || !arguments[0].type.element ||
+        arguments[0].type.element->kind != sema::TypeKind::Vec || !arguments[0].type.element->element) {
+        throw std::runtime_error("LLVM codegen: vec_get requires &Vec<T>");
+    }
+    const sema::Type element_type = *arguments[0].type.element->element;
+    const std::string element_llvm = module_.llvmType(element_type);
+    const std::string type = module_.llvmType(*arguments[0].type.element);
     const std::string aggregate = next("vec");
     const std::string data = next("vecdata");
     const std::string length = next("veclen");
@@ -838,9 +893,9 @@ void FunctionEmitter::builtinVecGetI32(const mir::Instruction& inst, const std::
     out_ << "  " << length << " = extractvalue " << type << ' ' << aggregate << ", 1\n";
     out_ << "  " << in_bounds << " = icmp ult " << module_.usizeType() << ' ' << index.repr << ", " << length << "\n";
     out_ << "  call void @nus_assert(i1 " << in_bounds << ")\n";
-    out_ << "  " << element << " = getelementptr inbounds i32, ptr " << data << ", " << module_.usizeType() << ' ' << index.repr << "\n";
-    out_ << "  " << loaded << " = load i32, ptr " << element << "\n";
-    store(*inst.destination, {"i32", loaded});
+    out_ << "  " << element << " = getelementptr inbounds " << element_llvm << ", ptr " << data << ", " << module_.usizeType() << ' ' << index.repr << "\n";
+    out_ << "  " << loaded << " = load " << element_llvm << ", ptr " << element << "\n";
+    store(*inst.destination, {element_llvm, loaded});
 }
 
 void FunctionEmitter::instruction(const mir::Instruction& inst) {
@@ -946,10 +1001,14 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             }
             if (callee.text == "string_clone") { builtinStringClone(inst, arguments); return; }
             if (callee.text == "string_len") { builtinStringLen(inst, arguments); return; }
-            if (callee.text == "vec_new_i32") { builtinVecNewI32(inst); return; }
-            if (callee.text == "vec_push_i32") { builtinVecPushI32(arguments); return; }
-            if (callee.text == "vec_len_i32") { builtinVecLenI32(inst, arguments); return; }
-            if (callee.text == "vec_get_i32") { builtinVecGetI32(inst, arguments); return; }
+            if (callee.text == "vec_new_i32" || callee.text.rfind("__builtin_vec_new$", 0) == 0) { builtinVecNew(inst); return; }
+            if (callee.text == "vec_push_i32" || callee.text.rfind("__builtin_vec_push$", 0) == 0) { builtinVecPush(arguments); return; }
+            if (callee.text == "vec_len_i32" || callee.text.rfind("__builtin_vec_len$", 0) == 0) { builtinVecLen(inst, arguments); return; }
+            if (callee.text == "vec_get_i32" || callee.text.rfind("__builtin_vec_get$", 0) == 0) { builtinVecGet(inst, arguments); return; }
+            if (callee.text.rfind("__builtin_some$", 0) == 0 || callee.text.rfind("__builtin_none$", 0) == 0 ||
+                callee.text.rfind("__builtin_ok$", 0) == 0 || callee.text.rfind("__builtin_err$", 0) == 0) {
+                throw std::runtime_error("LLVM codegen: Option/Result constructors are semantic-only in milestone 11");
+            }
             std::vector<Value> values;
             values.reserve(arguments.size());
             for (std::size_t i = 0; i < arguments.size(); ++i) {
