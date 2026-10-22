@@ -114,6 +114,7 @@ struct AssignmentExpr final : Expr {
 struct CallExpr final : Expr {
     explicit CallExpr(ExprPtr callee) : Expr(ExprKind::Call), callee(std::move(callee)) {}
     ExprPtr callee;
+    std::vector<TypeRef> generic_arguments;
     std::vector<ExprPtr> arguments;
 };
 
@@ -224,6 +225,11 @@ struct ForExpr final : Expr {
     std::unique_ptr<BlockExpr> body;
 };
 
+struct GenericParameter : Node {
+    std::string name;
+    std::vector<std::string> bounds;
+};
+
 struct Parameter : Node {
     std::string name;
     TypeRef type;
@@ -233,6 +239,7 @@ enum class ReceiverKind { None, Value, Reference, MutableReference };
 
 struct FunctionDecl : Node {
     std::string name;
+    std::vector<GenericParameter> generic_parameters;
     ReceiverKind receiver{ReceiverKind::None};
     SourceSpan receiver_span{};
     std::vector<Parameter> parameters;
@@ -250,12 +257,18 @@ struct StructDecl : Node {
     std::vector<StructFieldDecl> fields;
 };
 
+struct TraitDecl : Node {
+    std::string name;
+};
+
 struct ImplDecl : Node {
+    std::optional<TypeRef> trait;
     TypeRef target;
     std::vector<FunctionDecl> methods;
 };
 
 struct SourceFile : Node {
+    std::vector<TraitDecl> traits;
     std::vector<StructDecl> structs;
     std::vector<ImplDecl> impls;
     std::vector<FunctionDecl> functions;

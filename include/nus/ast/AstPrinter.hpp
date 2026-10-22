@@ -11,6 +11,7 @@ public:
     [[nodiscard]] std::string print(const SourceFile& file) const;
 
 private:
+    void printTrait(const TraitDecl& declaration, std::string& out, int depth) const;
     void printStruct(const StructDecl& declaration, std::string& out, int depth) const;
     void printImpl(const ImplDecl& declaration, std::string& out, int depth) const;
     void printFunction(const FunctionDecl& function, std::string& out, int depth) const;

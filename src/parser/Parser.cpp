@@ -62,7 +62,7 @@ void Parser::errorAt(const Token& token, std::string message) {
 
 void Parser::synchronizeTopLevel() {
     while (!isAtEnd()) {
-        if (check(TokenKind::KwFn) || check(TokenKind::KwStruct) || check(TokenKind::KwImpl)) return;
+        if (check(TokenKind::KwFn) || check(TokenKind::KwStruct) || check(TokenKind::KwTrait) || check(TokenKind::KwImpl)) return;
         advance();
     }
 }
@@ -106,13 +106,18 @@ ast::SourceFile Parser::parseSourceFile() {
             else synchronizeTopLevel();
             continue;
         }
+        if (check(TokenKind::KwTrait)) {
+            if (auto trait = parseTrait()) file.traits.push_back(std::move(*trait));
+            else synchronizeTopLevel();
+            continue;
+        }
         if (check(TokenKind::KwImpl)) {
             if (auto implementation = parseImpl()) file.impls.push_back(std::move(*implementation));
             else synchronizeTopLevel();
             continue;
         }
 
-        errorAt(current(), "expected top-level declaration (`fn`, `struct`, or `impl`)");
+        errorAt(current(), "expected top-level declaration (`fn`, `struct`, `trait`, or `impl`)");
         synchronizeTopLevel();
     }
 
@@ -122,10 +127,12 @@ ast::SourceFile Parser::parseSourceFile() {
 std::optional<ast::FunctionDecl> Parser::parseFunction(bool allow_receiver) {
     const auto start = expect(TokenKind::KwFn, "expected `fn`").span;
     const auto& name = expect(TokenKind::Identifier, "expected function name");
-    expect(TokenKind::LeftParen, "expected `(` after function name");
 
     ast::FunctionDecl function;
     function.name = tokenText(name);
+    function.generic_parameters = parseGenericParameters();
+
+    expect(TokenKind::LeftParen, "expected `(` after function name");
 
     if (!check(TokenKind::RightParen)) {
         bool parsed_receiver = false;
@@ -156,6 +163,47 @@ std::optional<ast::FunctionDecl> Parser::parseFunction(bool allow_receiver) {
     function.body = parseBlock();
     function.span = spanFrom(start, function.body->span);
     return function;
+}
+
+std::vector<ast::GenericParameter> Parser::parseGenericParameters() {
+    std::vector<ast::GenericParameter> parameters;
+    if (!match(TokenKind::Less)) return parameters;
+    const auto start = previous().span;
+    if (check(TokenKind::Greater)) {
+        errorAt(current(), "generic parameter list cannot be empty");
+        advance();
+        return parameters;
+    }
+    do {
+        const auto& name = expect(TokenKind::Identifier, "expected generic parameter name");
+        ast::GenericParameter parameter;
+        parameter.name = tokenText(name);
+        parameter.span = name.span;
+        if (match(TokenKind::Colon)) {
+            do {
+                const auto& bound = expect(TokenKind::Identifier, "expected trait bound");
+                parameter.bounds.push_back(tokenText(bound));
+                parameter.span = spanFrom(parameter.span, bound.span);
+            } while (match(TokenKind::Plus));
+        }
+        parameters.push_back(std::move(parameter));
+    } while (match(TokenKind::Comma));
+    const auto end = expect(TokenKind::Greater, "expected `>` after generic parameters").span;
+    (void)start; (void)end;
+    return parameters;
+}
+
+std::vector<ast::TypeRef> Parser::parseExplicitGenericArguments() {
+    std::vector<ast::TypeRef> arguments;
+    expect(TokenKind::ColonColon, "expected `::` before explicit generic arguments");
+    expect(TokenKind::Less, "expected `<` after `::`");
+    if (!check(TokenKind::Greater)) {
+        do {
+            arguments.push_back(parseType());
+        } while (match(TokenKind::Comma));
+    }
+    expect(TokenKind::Greater, "expected `>` after explicit generic arguments");
+    return arguments;
 }
 
 bool Parser::parseReceiver(ast::FunctionDecl& function) {
@@ -209,10 +257,31 @@ std::optional<ast::StructDecl> Parser::parseStruct() {
     return declaration;
 }
 
+std::optional<ast::TraitDecl> Parser::parseTrait() {
+    const auto start = expect(TokenKind::KwTrait, "expected `trait`").span;
+    const auto& name = expect(TokenKind::Identifier, "expected trait name");
+    ast::TraitDecl declaration;
+    declaration.name = tokenText(name);
+    expect(TokenKind::LeftBrace, "expected `{` after trait name");
+    if (!check(TokenKind::RightBrace)) {
+        errorAt(current(), "milestone 11 supports marker traits only; trait items are not implemented yet");
+        while (!check(TokenKind::RightBrace) && !isAtEnd()) advance();
+    }
+    const auto end = expect(TokenKind::RightBrace, "expected `}` after trait declaration").span;
+    declaration.span = spanFrom(start, end);
+    return declaration;
+}
+
 std::optional<ast::ImplDecl> Parser::parseImpl() {
     const auto start = expect(TokenKind::KwImpl, "expected `impl`").span;
     ast::ImplDecl declaration;
-    declaration.target = parseType();
+    auto first = parseType();
+    if (match(TokenKind::KwFor)) {
+        declaration.trait = std::move(first);
+        declaration.target = parseType();
+    } else {
+        declaration.target = std::move(first);
+    }
     expect(TokenKind::LeftBrace, "expected `{` after impl target");
 
     while (!check(TokenKind::RightBrace) && !isAtEnd()) {
@@ -602,6 +671,24 @@ ast::ExprPtr Parser::parseStructLiteral(const Token& type_name) {
 
 ast::ExprPtr Parser::parsePostfix(ast::ExprPtr expression) {
     while (true) {
+        if (check(TokenKind::ColonColon) && checkNext(TokenKind::Less)) {
+            const auto start = expression->span;
+            auto generic_arguments = parseExplicitGenericArguments();
+            expect(TokenKind::LeftParen, "expected `(` after explicit generic arguments");
+            auto call = std::make_unique<ast::CallExpr>(std::move(expression));
+            call->generic_arguments = std::move(generic_arguments);
+            if (!check(TokenKind::RightParen)) {
+                do {
+                    auto argument = parseExpression();
+                    if (argument) call->arguments.push_back(std::move(argument));
+                } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+            }
+            const auto end = expect(TokenKind::RightParen, "expected `)` after arguments").span;
+            call->span = spanFrom(start, end);
+            expression = std::move(call);
+            continue;
+        }
+
         if (match(TokenKind::LeftParen)) {
             const auto start = expression->span;
             auto call = std::make_unique<ast::CallExpr>(std::move(expression));

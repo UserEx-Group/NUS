@@ -12,10 +12,15 @@ void AstPrinter::line(std::string& out, int depth, std::string_view text) {
 std::string AstPrinter::print(const SourceFile& file) const {
     std::string out;
     line(out, 0, "SourceFile");
+    for (const auto& trait : file.traits) printTrait(trait, out, 1);
     for (const auto& structure : file.structs) printStruct(structure, out, 1);
     for (const auto& implementation : file.impls) printImpl(implementation, out, 1);
     for (const auto& function : file.functions) printFunction(function, out, 1);
     return out;
+}
+
+void AstPrinter::printTrait(const TraitDecl& declaration, std::string& out, int depth) const {
+    line(out, depth, "TraitDecl " + declaration.name);
 }
 
 void AstPrinter::printStruct(const StructDecl& declaration, std::string& out, int depth) const {
@@ -26,12 +31,24 @@ void AstPrinter::printStruct(const StructDecl& declaration, std::string& out, in
 }
 
 void AstPrinter::printImpl(const ImplDecl& declaration, std::string& out, int depth) const {
-    line(out, depth, "ImplDecl " + declaration.target.name());
+    line(out, depth, declaration.trait ? "TraitImpl " + declaration.trait->name() + " for " + declaration.target.name()
+                                       : "ImplDecl " + declaration.target.name());
     for (const auto& method : declaration.methods) printFunction(method, out, depth + 1);
 }
 
 void AstPrinter::printFunction(const FunctionDecl& function, std::string& out, int depth) const {
     line(out, depth, "FunctionDecl " + function.name);
+    for (const auto& generic : function.generic_parameters) {
+        std::string text = "Generic " + generic.name;
+        if (!generic.bounds.empty()) {
+            text += ": ";
+            for (std::size_t i = 0; i < generic.bounds.size(); ++i) {
+                if (i != 0) text += " + ";
+                text += generic.bounds[i];
+            }
+        }
+        line(out, depth + 1, text);
+    }
     switch (function.receiver) {
         case ReceiverKind::Value: line(out, depth + 1, "Receiver self"); break;
         case ReceiverKind::Reference: line(out, depth + 1, "Receiver &self"); break;
@@ -129,7 +146,16 @@ void AstPrinter::printExpression(const Expr& expression, std::string& out, int d
         }
         case ExprKind::Call: {
             const auto& call = static_cast<const CallExpr&>(expression);
-            line(out, depth, "Call");
+            std::string title = "Call";
+            if (!call.generic_arguments.empty()) {
+                title += "::<";
+                for (std::size_t i = 0; i < call.generic_arguments.size(); ++i) {
+                    if (i != 0) title += ", ";
+                    title += call.generic_arguments[i].name();
+                }
+                title += ">";
+            }
+            line(out, depth, title);
             line(out, depth + 1, "Callee");
             printExpression(*call.callee, out, depth + 2);
             for (const auto& argument : call.arguments) {
