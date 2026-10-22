@@ -1,8 +1,12 @@
+trait NetworkValue {}
+
 struct Packet {
     source: u32,
     destination: u32,
     payload_size: usize,
 }
+
+impl NetworkValue for Packet {}
 
 impl Packet {
     fn route_key(&self) -> u32 {
@@ -16,6 +20,14 @@ impl Packet {
     fn consume(self) {
         print(self.source, self.destination, self.payload_size);
     }
+}
+
+fn identity<T>(value: T) -> T {
+    value
+}
+
+fn route_class<T: NetworkValue>(value: &T) -> i32 {
+    1
 }
 
 fn inspect(packet: &Packet) {
@@ -39,19 +51,26 @@ fn main() {
     let view = &packet;
     print(view.source, view.payload_size);
 
-    // NLL: the shared loan ends after the last use of `view`,
-    // so a mutable receiver is legal in the same lexical block.
+    // NLL: the shared loan ends after the last use of `view`.
     packet.set_source(64);
+
+    print(route_class(&packet), identity(99));
 
     let literal = "network";
     let owned = string_clone(&literal);
     print(string_len(&owned), owned);
 
-    let mut samples: Vec<i32> = vec_new_i32();
-    vec_push_i32(&mut samples, 10);
-    vec_push_i32(&mut samples, 20);
-    vec_push_i32(&mut samples, 30);
-    print(vec_len_i32(&samples), vec_get_i32(&samples, 1));
+    let mut samples: Vec<i32> = vec_new::<i32>();
+    vec_push(&mut samples, 10);
+    vec_push(&mut samples, identity(20));
+    vec_push(&mut samples, 30);
+    print(vec_len(&samples), vec_get(&samples, 1));
+
+    let item_literal = "owned-in-vector";
+    let item = string_clone(&item_literal);
+    let mut names: Vec<string> = vec_new::<string>();
+    vec_push(&mut names, item);
+    print(vec_len(&names));
 
     packet.consume();
 }

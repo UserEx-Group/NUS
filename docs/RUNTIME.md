@@ -59,3 +59,7 @@ Dropping a vector frees its allocation. `free(null)` handles empty vectors safel
 The native backend recursively destroys heap-owning fields inside structs and fixed arrays. This is the first form of NUS drop glue.
 
 User-defined destructors are not available yet.
+
+## Milestone 11 generic runtime layer
+
+The `vec_*_i32` entry points remain compatibility shims, while the semantic/runtime interface now exposes generic `vec_new<T>`, `vec_push<T>`, `vec_len<T>` and `vec_get<T: Copy>`. Concrete element types are propagated through monomorphized HIR/MIR into LLVM. Non-Copy elements transferred into a vector are recursively destroyed by vector drop glue.

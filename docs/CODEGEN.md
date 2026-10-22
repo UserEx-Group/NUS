@@ -132,3 +132,16 @@ The backend is intentionally `-O0` and correctness-oriented first.
 ## Milestone 10 additions
 
 The Windows host target now uses the GNU ABI (`x86_64-w64-windows-gnu`) and MinGW-w64 rather than implicitly relying on MSVC libraries. Runtime codegen now imports heap primitives, emits real drop glue/drop flags, represents `string` and `Vec<T>` as three-word runtime values, and exposes a target-aware layout engine.
+
+## Milestone 11 additions
+
+Generic source functions are monomorphized before MIR. The LLVM backend never receives unresolved type parameters: each used specialization has a concrete symbol such as `identity$g$i32` and a fully concrete signature.
+
+Generic `Vec<T>` operations use the concrete LLVM element type. `vec_push` derives element size using a null GEP/`ptrtoint` sequence instead of a hard-coded element width, and vector drop glue walks non-Copy elements before releasing the allocation.
+
+`Option<T>` and `Result<T,E>` have preliminary ABI/type representations, but their constructors are intentionally blocked from native lowering until tagged-value operations and pattern matching are implemented.
+
+
+## Windows process execution
+
+Native linking is launched directly rather than through `cmd.exe`. Generated executables used by integration tests are also started with `CreateProcessW`, with stdout captured through an inherited pipe. The child process receives the configured MinGW-w64 `bin` directory in `PATH`, avoiding shell quoting issues and missing runtime DLLs. Test output is normalized from CRLF to LF before comparison.
