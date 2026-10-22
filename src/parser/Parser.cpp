@@ -271,6 +271,14 @@ ast::TypeRef Parser::parseType() {
         type.span = spanFrom(type.span, part.span);
     }
 
+    if (match(TokenKind::Less)) {
+        do {
+            type.generic_arguments.push_back(parseType());
+        } while (match(TokenKind::Comma));
+        const auto end = expect(TokenKind::Greater, "expected `>` after generic type arguments").span;
+        type.span = spanFrom(type.span, end);
+    }
+
     return type;
 }
 

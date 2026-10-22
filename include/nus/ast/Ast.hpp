@@ -25,6 +25,7 @@ struct Node {
 
 struct TypeRef : Node {
     std::vector<std::string> path;
+    std::vector<TypeRef> generic_arguments;
     bool is_reference{false};
     bool is_mutable_reference{false};
 
@@ -33,6 +34,14 @@ struct TypeRef : Node {
         for (std::size_t i = 0; i < path.size(); ++i) {
             if (i != 0) result += "::";
             result += path[i];
+        }
+        if (!generic_arguments.empty()) {
+            result += "<";
+            for (std::size_t i = 0; i < generic_arguments.size(); ++i) {
+                if (i != 0) result += ", ";
+                result += generic_arguments[i].name();
+            }
+            result += ">";
         }
         if (is_reference) {
             return std::string("&") + (is_mutable_reference ? "mut " : "") + result;
