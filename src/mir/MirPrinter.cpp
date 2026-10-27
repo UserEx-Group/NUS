@@ -29,6 +29,10 @@ std::string instructionName(InstructionKind kind) {
         case InstructionKind::MakeArray: return "array";
         case InstructionKind::MakeRange: return "range";
         case InstructionKind::MakeStruct: return "struct";
+        case InstructionKind::MakeVariant: return "variant";
+        case InstructionKind::GetDiscriminant: return "discriminant";
+        case InstructionKind::GetVariantField: return "variant.field";
+        case InstructionKind::Consume: return "consume";
         case InstructionKind::IterInit: return "iter.init";
         case InstructionKind::IterHasNext: return "iter.has_next";
         case InstructionKind::IterNext: return "iter.next";

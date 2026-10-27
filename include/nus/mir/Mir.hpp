@@ -36,6 +36,10 @@ enum class InstructionKind {
     MakeArray,
     MakeRange,
     MakeStruct,
+    MakeVariant,
+    GetDiscriminant,
+    GetVariantField,
+    Consume,
     IterInit,
     IterHasNext,
     IterNext,
@@ -102,8 +106,20 @@ struct Struct {
     std::vector<StructField> fields;
 };
 
+struct EnumVariant {
+    std::string name;
+    std::size_t tag{0};
+    std::vector<sema::Type> payloads;
+};
+
+struct Enum {
+    std::string name;
+    std::vector<EnumVariant> variants;
+};
+
 struct Program {
     std::vector<Struct> structs;
+    std::vector<Enum> enums;
     std::vector<Function> functions;
 };
 

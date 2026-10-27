@@ -94,6 +94,7 @@ std::vector<LocalId> consumedByInstruction(const Instruction& instruction) {
         }
         case InstructionKind::MakeStruct:
         case InstructionKind::MakeArray:
+        case InstructionKind::MakeVariant:
             for (const auto& operand : instruction.operands) consume(operand);
             break;
         case InstructionKind::StoreMember:
@@ -103,12 +104,17 @@ std::vector<LocalId> consumedByInstruction(const Instruction& instruction) {
         case InstructionKind::IterInit:
             if (!instruction.operands.empty()) consume(instruction.operands.front());
             break;
+        case InstructionKind::Consume:
+            if (!instruction.operands.empty()) consume(instruction.operands.front());
+            break;
         case InstructionKind::Unary:
         case InstructionKind::Binary:
         case InstructionKind::Borrow:
         case InstructionKind::Member:
         case InstructionKind::Index:
         case InstructionKind::MakeRange:
+        case InstructionKind::GetDiscriminant:
+        case InstructionKind::GetVariantField:
         case InstructionKind::IterHasNext:
         case InstructionKind::IterNext:
         case InstructionKind::Drop:

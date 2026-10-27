@@ -8,6 +8,7 @@ namespace nus::mir {
 namespace {
 sema::Type unitType() { return sema::Type::simple(sema::TypeKind::Unit); }
 sema::Type boolType() { return sema::Type::simple(sema::TypeKind::Bool); }
+sema::Type i32Type() { return sema::Type::simple(sema::TypeKind::I32); }
 
 std::string baseStructName(sema::Type type) {
     while (type.kind == sema::TypeKind::Reference && type.element) type = *type.element;
@@ -22,6 +23,14 @@ Program MirBuilder::lower(const hir::Program& program) {
         lowered.name = structure.name;
         for (const auto& field : structure.fields) lowered.fields.push_back(StructField{field.name, field.type});
         result.structs.push_back(std::move(lowered));
+    }
+    for (const auto& enumeration : program.enums) {
+        Enum lowered;
+        lowered.name = enumeration.name;
+        for (const auto& variant : enumeration.variants) {
+            lowered.variants.push_back(EnumVariant{variant.name, variant.tag, variant.payloads});
+        }
+        result.enums.push_back(std::move(lowered));
     }
     for (const auto& function : program.functions) result.functions.push_back(lowerFunction(function));
     return result;
@@ -243,6 +252,111 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
                              .name = expression.text + "{" + fields + "}",
                              .operands = std::move(values), .span = expression.span});
             return localOperand(dest);
+        }
+        case hir::ExprKind::Variant: {
+            std::vector<Operand> payloads;
+            for (const auto& child : expression.operands) payloads.push_back(lowerExpr(*child));
+            const LocalId dest = createTemp(expression.type);
+            emit(Instruction{.kind = InstructionKind::MakeVariant, .destination = dest, .name = expression.text,
+                             .operands = std::move(payloads), .span = expression.span});
+            return localOperand(dest);
+        }
+        case hir::ExprKind::Match: {
+            const Operand scrutinee = lowerExpr(*expression.operands.at(0));
+            const BlockId join = createBlock();
+            std::optional<LocalId> result_local;
+            if (!expression.type.isUnit()) result_local = createTemp(expression.type);
+
+            for (std::size_t arm_index = 0; arm_index < expression.match_arms.size(); ++arm_index) {
+                const auto& arm = expression.match_arms[arm_index];
+                const BlockId arm_block = createBlock();
+                const bool irrefutable = arm.pattern.kind != hir::PatternKind::Variant;
+                BlockId next_test = InvalidBlockId;
+                if (irrefutable) {
+                    gotoIfOpen(arm_block, arm.span);
+                } else {
+                    next_test = createBlock();
+                    const LocalId tag = createTemp(i32Type());
+                    emit(Instruction{.kind = InstructionKind::GetDiscriminant, .destination = tag,
+                                     .operands = {scrutinee}, .span = arm.span});
+                    const LocalId condition = createTemp(boolType());
+                    emit(Instruction{.kind = InstructionKind::Binary, .destination = condition, .op = TokenKind::EqualEqual,
+                                     .operands = {localOperand(tag), Operand{.kind = OperandKind::Literal, .text = std::to_string(arm.pattern.tag), .type = i32Type()}},
+                                     .span = arm.span});
+                    terminate(Terminator{.kind = TerminatorKind::Branch, .condition = localOperand(condition),
+                                         .then_block = arm_block, .else_block = next_test, .span = arm.span});
+                }
+
+                switchTo(arm_block);
+                if (arm.pattern.whole_binding) {
+                    emit(Instruction{.kind = InstructionKind::Assign, .destination = arm.pattern.whole_binding->id,
+                                     .operands = {scrutinee}, .span = arm.span});
+                }
+                for (const auto& binding : arm.pattern.bindings) {
+                    emit(Instruction{.kind = InstructionKind::GetVariantField, .destination = binding.local.id,
+                                     .name = arm.pattern.variant,
+                                     .operands = {scrutinee, Operand{.kind = OperandKind::Literal, .text = std::to_string(binding.payload_index), .type = i32Type()}},
+                                     .span = arm.span});
+                }
+                const Operand arm_value = lowerExpr(*arm.value);
+                if (isOpen()) {
+                    if (result_local) emit(Instruction{.kind = InstructionKind::Assign, .destination = *result_local,
+                                                       .operands = {arm_value}, .span = arm.span});
+                    gotoIfOpen(join, arm.span);
+                }
+                if (!irrefutable) switchTo(next_test);
+                else break;
+            }
+            if (isOpen()) terminate(Terminator{.kind = TerminatorKind::Unreachable, .span = expression.span});
+            switchTo(join);
+            return result_local ? localOperand(*result_local) : unitOperand();
+        }
+        case hir::ExprKind::Try: {
+            const Operand source = lowerExpr(*expression.operands.at(0));
+            const sema::Type container = expression.operands.at(0)->type;
+            const bool is_option = container.kind == sema::TypeKind::Option;
+            const std::string success_variant = is_option ? "Some" : "Ok";
+            const std::string failure_variant = is_option ? "None" : "Err";
+            const std::size_t success_tag = is_option ? 1U : 0U;
+
+            const LocalId tag = createTemp(i32Type());
+            emit(Instruction{.kind = InstructionKind::GetDiscriminant, .destination = tag, .operands = {source}, .span = expression.span});
+            const LocalId success_cond = createTemp(boolType());
+            emit(Instruction{.kind = InstructionKind::Binary, .destination = success_cond, .op = TokenKind::EqualEqual,
+                             .operands = {localOperand(tag), Operand{.kind = OperandKind::Literal, .text = std::to_string(success_tag), .type = i32Type()}},
+                             .span = expression.span});
+            const BlockId success = createBlock();
+            const BlockId failure = createBlock();
+            const BlockId join = createBlock();
+            terminate(Terminator{.kind = TerminatorKind::Branch, .condition = localOperand(success_cond),
+                                 .then_block = success, .else_block = failure, .span = expression.span});
+
+            switchTo(success);
+            const LocalId value_local = createTemp(expression.type);
+            emit(Instruction{.kind = InstructionKind::GetVariantField, .destination = value_local, .name = success_variant,
+                             .operands = {source, Operand{.kind = OperandKind::Literal, .text = "0", .type = i32Type()}},
+                             .span = expression.span});
+            if (!container.isCopy()) emit(Instruction{.kind = InstructionKind::Consume, .operands = {source}, .span = expression.span});
+            gotoIfOpen(join, expression.span);
+
+            switchTo(failure);
+            const LocalId propagated = createTemp(expression.context_type);
+            std::vector<Operand> failure_payloads;
+            if (!is_option) {
+                const sema::Type error_type = container.generic_arguments.at(1);
+                const LocalId error_local = createTemp(error_type);
+                emit(Instruction{.kind = InstructionKind::GetVariantField, .destination = error_local, .name = failure_variant,
+                                 .operands = {source, Operand{.kind = OperandKind::Literal, .text = "0", .type = i32Type()}},
+                                 .span = expression.span});
+                failure_payloads.push_back(localOperand(error_local));
+            }
+            emit(Instruction{.kind = InstructionKind::MakeVariant, .destination = propagated, .name = failure_variant,
+                             .operands = std::move(failure_payloads), .span = expression.span});
+            if (!container.isCopy()) emit(Instruction{.kind = InstructionKind::Consume, .operands = {source}, .span = expression.span});
+            terminate(Terminator{.kind = TerminatorKind::Return, .value = localOperand(propagated), .span = expression.span});
+
+            switchTo(join);
+            return localOperand(value_local);
         }
         case hir::ExprKind::Block:
             return lowerBlock(expression);
