@@ -43,7 +43,7 @@ Program HirBuilder::lower(const ast::SourceFile& file) {
     enum_variants_.clear();
     method_receivers_.clear();
     for (const auto& implementation : file.impls) {
-        if (implementation.trait) continue;
+        if (!implementation.generic_parameters.empty()) continue;
         const std::string owner = implementation.target.name();
         for (const auto& method : implementation.methods) {
             ReceiverMode mode = ReceiverMode::None;
@@ -101,8 +101,9 @@ Program HirBuilder::lower(const ast::SourceFile& file) {
         if (function.generic_parameters.empty()) program.functions.push_back(lowerFunction(function));
     }
     for (const auto& implementation : file.impls) {
-        if (implementation.trait) continue;
+        if (!implementation.generic_parameters.empty()) continue;
         const std::string owner = implementation.target.name();
+        if (!struct_types_.contains(owner)) continue;
         for (const auto& method : implementation.methods) {
             program.functions.push_back(lowerFunction(method, owner));
         }
@@ -111,14 +112,16 @@ Program HirBuilder::lower(const ast::SourceFile& file) {
         if (!instantiation.declaration || instantiation.builtin) continue;
         std::unordered_map<std::string, sema::Type> substitutions;
         for (const auto& [name, type] : instantiation.substitutions) substitutions.emplace(name, type);
-        program.functions.push_back(lowerFunction(*instantiation.declaration, {}, instantiation.symbol_name, std::move(substitutions)));
+        program.functions.push_back(lowerFunction(*instantiation.declaration, {}, instantiation.symbol_name,
+                                                 std::move(substitutions), instantiation.receiver_type));
     }
     return program;
 }
 
 Function HirBuilder::lowerFunction(const ast::FunctionDecl& function, std::string owner_type,
                                    std::string symbol_name,
-                                   std::unordered_map<std::string, sema::Type> substitutions) {
+                                   std::unordered_map<std::string, sema::Type> substitutions,
+                                   sema::Type receiver_base) {
     scopes_.clear();
     locals_.clear();
     next_local_ = 0;
@@ -133,7 +136,9 @@ Function HirBuilder::lowerFunction(const ast::FunctionDecl& function, std::strin
     current_return_type_ = lowered.return_type;
 
     if (function.receiver != ast::ReceiverKind::None) {
-        sema::Type receiver_type = sema::Type::structure(lowered.owner_type);
+        sema::Type receiver_type = receiver_base.kind == sema::TypeKind::Unknown
+                                      ? sema::Type::structure(lowered.owner_type)
+                                      : substituteType(receiver_base);
         bool is_mutable = false;
         if (function.receiver == ast::ReceiverKind::Reference) {
             receiver_type = sema::Type::reference(receiver_type, false);
@@ -210,9 +215,20 @@ ExprPtr HirBuilder::lowerExpr(const ast::Expr& expression) {
             const auto& node = static_cast<const ast::CallExpr&>(expression);
             result->kind = ExprKind::Call;
             auto callee = lowerExpr(*node.callee);
-            if (const auto* target = semantic_.resolvedCallTarget(node); target && callee->kind == ExprKind::Global) {
-                callee->text = *target;
-                if (const auto* resolved = semantic_.typeOf(*node.callee)) callee->type = substituteType(*resolved);
+            if (const auto* target = semantic_.resolvedCallTarget(node); target) {
+                if (callee->kind == ExprKind::Global) {
+                    callee->text = *target;
+                    if (const auto* resolved = semantic_.typeOf(*node.callee)) callee->type = substituteType(*resolved);
+                } else if (callee->kind == ExprKind::Member) {
+                    callee->text = *target;
+                    callee->flag = true; // resolved direct method symbol
+                    switch (semantic_.resolvedCallReceiver(node)) {
+                        case ast::ReceiverKind::Value: callee->receiver = ReceiverMode::Value; break;
+                        case ast::ReceiverKind::Reference: callee->receiver = ReceiverMode::Shared; break;
+                        case ast::ReceiverKind::MutableReference: callee->receiver = ReceiverMode::Mutable; break;
+                        case ast::ReceiverKind::None: break;
+                    }
+                }
             }
             result->operands.push_back(std::move(callee));
             for (const auto& argument : node.arguments) result->operands.push_back(lowerExpr(*argument));
@@ -228,6 +244,10 @@ ExprPtr HirBuilder::lowerExpr(const ast::Expr& expression) {
             if (base.kind == sema::TypeKind::Struct) {
                 const auto found = method_receivers_.find(base.nominal_name + "::" + node.member);
                 if (found != method_receivers_.end()) result->receiver = found->second;
+            } else if (base.kind == sema::TypeKind::Vec) {
+                if (node.member == "push") result->receiver = ReceiverMode::Mutable;
+                else if (node.member == "len" || node.member == "get") result->receiver = ReceiverMode::Shared;
+                else if (node.member == "into_iter") result->receiver = ReceiverMode::Value;
             }
             result->operands.push_back(std::move(object));
             break;
@@ -377,7 +397,8 @@ ExprPtr HirBuilder::lowerExpr(const ast::Expr& expression) {
             auto iterable = lowerExpr(*node.iterable);
             sema::Type binding_type = unknownType();
             if (iterable->type.kind == sema::TypeKind::Range || iterable->type.kind == sema::TypeKind::Array ||
-                iterable->type.kind == sema::TypeKind::Slice) {
+                iterable->type.kind == sema::TypeKind::Slice || iterable->type.kind == sema::TypeKind::Vec ||
+                iterable->type.kind == sema::TypeKind::VecIter) {
                 if (iterable->type.element) binding_type = *iterable->type.element;
             } else if (iterable->type.kind == sema::TypeKind::Bytes) {
                 binding_type = sema::Type::simple(sema::TypeKind::U8);
@@ -462,6 +483,8 @@ sema::Type HirBuilder::lowerTypeRef(const ast::TypeRef& type) const {
         base = found->second;
     } else if (name == "Vec" && type.generic_arguments.size() == 1) {
         base = sema::Type::vector(lowerTypeRef(type.generic_arguments.front()));
+    } else if (name == "VecIter" && type.generic_arguments.size() == 1) {
+        base = sema::Type::vectorIterator(lowerTypeRef(type.generic_arguments.front()));
     } else if (name == "Option" && type.generic_arguments.size() == 1) {
         base = sema::Type::option(lowerTypeRef(type.generic_arguments.front()));
     } else if (name == "Result" && type.generic_arguments.size() == 2) {
@@ -481,6 +504,7 @@ sema::Type HirBuilder::substituteType(const sema::Type& type) const {
     }
     if (type.kind == sema::TypeKind::Reference && type.element) return sema::Type::reference(substituteType(*type.element), type.mutable_reference);
     if (type.kind == sema::TypeKind::Vec && type.element) return sema::Type::vector(substituteType(*type.element));
+    if (type.kind == sema::TypeKind::VecIter && type.element) return sema::Type::vectorIterator(substituteType(*type.element));
     if (type.kind == sema::TypeKind::Option && type.element) return sema::Type::option(substituteType(*type.element));
     if (type.kind == sema::TypeKind::Array && type.element) return sema::Type::array(substituteType(*type.element), type.array_length);
     if (type.kind == sema::TypeKind::Slice && type.element) return sema::Type::slice(substituteType(*type.element));

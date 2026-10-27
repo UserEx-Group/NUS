@@ -19,7 +19,8 @@ public:
 private:
     [[nodiscard]] Function lowerFunction(const ast::FunctionDecl& function, std::string owner_type = {},
                                          std::string symbol_name = {},
-                                         std::unordered_map<std::string, sema::Type> substitutions = {});
+                                         std::unordered_map<std::string, sema::Type> substitutions = {},
+                                         sema::Type receiver_base = sema::Type::simple(sema::TypeKind::Unknown));
     [[nodiscard]] ExprPtr lowerExpr(const ast::Expr& expression);
     [[nodiscard]] StmtPtr lowerStmt(const ast::Stmt& statement);
     [[nodiscard]] ExprPtr lowerBlock(const ast::BlockExpr& block, bool create_scope = true);
