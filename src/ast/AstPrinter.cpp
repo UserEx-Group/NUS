@@ -14,6 +14,7 @@ std::string AstPrinter::print(const SourceFile& file) const {
     line(out, 0, "SourceFile");
     for (const auto& trait : file.traits) printTrait(trait, out, 1);
     for (const auto& structure : file.structs) printStruct(structure, out, 1);
+    for (const auto& enumeration : file.enums) printEnum(enumeration, out, 1);
     for (const auto& implementation : file.impls) printImpl(implementation, out, 1);
     for (const auto& function : file.functions) printFunction(function, out, 1);
     return out;
@@ -28,6 +29,36 @@ void AstPrinter::printStruct(const StructDecl& declaration, std::string& out, in
     for (const auto& field : declaration.fields) {
         line(out, depth + 1, "Field " + field.name + ": " + field.type.name());
     }
+}
+
+void AstPrinter::printEnum(const EnumDecl& declaration, std::string& out, int depth) const {
+    line(out, depth, "EnumDecl " + declaration.name);
+    for (const auto& variant : declaration.variants) {
+        std::string text = "Variant " + variant.name;
+        if (!variant.payload_types.empty()) {
+            text += "(";
+            for (std::size_t i = 0; i < variant.payload_types.size(); ++i) {
+                if (i != 0) text += ", ";
+                text += variant.payload_types[i].name();
+            }
+            text += ")";
+        }
+        line(out, depth + 1, text);
+    }
+}
+
+void AstPrinter::printPattern(const Pattern& pattern, std::string& out, int depth) const {
+    if (pattern.kind == PatternKind::Wildcard) {
+        line(out, depth, "Pattern _");
+        return;
+    }
+    if (pattern.kind == PatternKind::Name) {
+        line(out, depth, "Pattern " + pattern.name);
+        return;
+    }
+    const std::string qualified = pattern.enum_name.empty() ? pattern.variant : pattern.enum_name + "::" + pattern.variant;
+    line(out, depth, "VariantPattern " + qualified);
+    for (const auto& child : pattern.elements) printPattern(child, out, depth + 1);
 }
 
 void AstPrinter::printImpl(const ImplDecl& declaration, std::string& out, int depth) const {
@@ -208,6 +239,30 @@ void AstPrinter::printExpression(const Expr& expression, std::string& out, int d
             for (const auto& field : literal.fields) {
                 line(out, depth + 1, "Field " + field.name);
                 printExpression(*field.value, out, depth + 2);
+            }
+            break;
+        }
+        case ExprKind::Variant: {
+            const auto& variant = static_cast<const VariantExpr&>(expression);
+            line(out, depth, "Variant " + variant.enum_name + "::" + variant.variant);
+            for (const auto& payload : variant.payloads) printExpression(*payload, out, depth + 1);
+            break;
+        }
+        case ExprKind::Try: {
+            const auto& value = static_cast<const TryExpr&>(expression);
+            line(out, depth, "Try ?");
+            printExpression(*value.operand, out, depth + 1);
+            break;
+        }
+        case ExprKind::Match: {
+            const auto& value = static_cast<const MatchExpr&>(expression);
+            line(out, depth, "Match");
+            line(out, depth + 1, "Scrutinee");
+            printExpression(*value.scrutinee, out, depth + 2);
+            for (const auto& arm : value.arms) {
+                line(out, depth + 1, "Arm");
+                printPattern(arm.pattern, out, depth + 2);
+                if (arm.value) printExpression(*arm.value, out, depth + 2);
             }
             break;
         }

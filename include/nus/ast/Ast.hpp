@@ -67,6 +67,9 @@ enum class ExprKind {
     While,
     Loop,
     For,
+    Variant,
+    Match,
+    Try,
 };
 
 struct Expr : Node {
@@ -225,6 +228,41 @@ struct ForExpr final : Expr {
     std::unique_ptr<BlockExpr> body;
 };
 
+
+struct VariantExpr final : Expr {
+    VariantExpr(std::string enum_name, std::string variant)
+        : Expr(ExprKind::Variant), enum_name(std::move(enum_name)), variant(std::move(variant)) {}
+    std::string enum_name;
+    std::string variant;
+    std::vector<ExprPtr> payloads;
+};
+
+enum class PatternKind { Wildcard, Name, Variant };
+
+struct Pattern : Node {
+    PatternKind kind{PatternKind::Name};
+    std::string name;
+    std::string enum_name;
+    std::string variant;
+    std::vector<Pattern> elements;
+};
+
+struct MatchArm : Node {
+    Pattern pattern;
+    ExprPtr value;
+};
+
+struct MatchExpr final : Expr {
+    MatchExpr() : Expr(ExprKind::Match) {}
+    ExprPtr scrutinee;
+    std::vector<MatchArm> arms;
+};
+
+struct TryExpr final : Expr {
+    explicit TryExpr(ExprPtr operand) : Expr(ExprKind::Try), operand(std::move(operand)) {}
+    ExprPtr operand;
+};
+
 struct GenericParameter : Node {
     std::string name;
     std::vector<std::string> bounds;
@@ -257,6 +295,17 @@ struct StructDecl : Node {
     std::vector<StructFieldDecl> fields;
 };
 
+
+struct EnumVariantDecl : Node {
+    std::string name;
+    std::vector<TypeRef> payload_types;
+};
+
+struct EnumDecl : Node {
+    std::string name;
+    std::vector<EnumVariantDecl> variants;
+};
+
 struct TraitDecl : Node {
     std::string name;
 };
@@ -270,6 +319,7 @@ struct ImplDecl : Node {
 struct SourceFile : Node {
     std::vector<TraitDecl> traits;
     std::vector<StructDecl> structs;
+    std::vector<EnumDecl> enums;
     std::vector<ImplDecl> impls;
     std::vector<FunctionDecl> functions;
 };
