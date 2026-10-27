@@ -34,6 +34,7 @@ private:
 
     [[nodiscard]] std::optional<ast::FunctionDecl> parseFunction(bool allow_receiver = false);
     [[nodiscard]] std::optional<ast::StructDecl> parseStruct();
+    [[nodiscard]] std::optional<ast::EnumDecl> parseEnum();
     [[nodiscard]] std::optional<ast::TraitDecl> parseTrait();
     [[nodiscard]] std::optional<ast::ImplDecl> parseImpl();
     [[nodiscard]] bool parseReceiver(ast::FunctionDecl& function);
@@ -60,6 +61,8 @@ private:
     [[nodiscard]] ast::ExprPtr parseWhileExpression();
     [[nodiscard]] ast::ExprPtr parseLoopExpression();
     [[nodiscard]] ast::ExprPtr parseForExpression();
+    [[nodiscard]] ast::ExprPtr parseMatchExpression();
+    [[nodiscard]] ast::Pattern parsePattern();
 
     [[nodiscard]] static int binaryPrecedence(TokenKind kind) noexcept;
     [[nodiscard]] static bool isRightAssociative(TokenKind kind) noexcept;

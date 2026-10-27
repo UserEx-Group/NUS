@@ -62,7 +62,7 @@ void Parser::errorAt(const Token& token, std::string message) {
 
 void Parser::synchronizeTopLevel() {
     while (!isAtEnd()) {
-        if (check(TokenKind::KwFn) || check(TokenKind::KwStruct) || check(TokenKind::KwTrait) || check(TokenKind::KwImpl)) return;
+        if (check(TokenKind::KwFn) || check(TokenKind::KwStruct) || check(TokenKind::KwEnum) || check(TokenKind::KwTrait) || check(TokenKind::KwImpl)) return;
         advance();
     }
 }
@@ -106,6 +106,11 @@ ast::SourceFile Parser::parseSourceFile() {
             else synchronizeTopLevel();
             continue;
         }
+        if (check(TokenKind::KwEnum)) {
+            if (auto enumeration = parseEnum()) file.enums.push_back(std::move(*enumeration));
+            else synchronizeTopLevel();
+            continue;
+        }
         if (check(TokenKind::KwTrait)) {
             if (auto trait = parseTrait()) file.traits.push_back(std::move(*trait));
             else synchronizeTopLevel();
@@ -117,7 +122,7 @@ ast::SourceFile Parser::parseSourceFile() {
             continue;
         }
 
-        errorAt(current(), "expected top-level declaration (`fn`, `struct`, `trait`, or `impl`)");
+        errorAt(current(), "expected top-level declaration (`fn`, `struct`, `enum`, `trait`, or `impl`)");
         synchronizeTopLevel();
     }
 
@@ -253,6 +258,40 @@ std::optional<ast::StructDecl> Parser::parseStruct() {
     }
 
     const auto end = expect(TokenKind::RightBrace, "expected `}` after struct declaration").span;
+    declaration.span = spanFrom(start, end);
+    return declaration;
+}
+
+std::optional<ast::EnumDecl> Parser::parseEnum() {
+    const auto start = expect(TokenKind::KwEnum, "expected `enum`").span;
+    const auto& name = expect(TokenKind::Identifier, "expected enum name");
+    expect(TokenKind::LeftBrace, "expected `{` after enum name");
+
+    ast::EnumDecl declaration;
+    declaration.name = tokenText(name);
+
+    while (!check(TokenKind::RightBrace) && !isAtEnd()) {
+        const auto& variant_name = expect(TokenKind::Identifier, "expected enum variant name");
+        ast::EnumVariantDecl variant;
+        variant.name = tokenText(variant_name);
+        variant.span = variant_name.span;
+        if (match(TokenKind::LeftParen)) {
+            if (!check(TokenKind::RightParen)) {
+                do {
+                    variant.payload_types.push_back(parseType());
+                } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+            }
+            const auto end = expect(TokenKind::RightParen, "expected `)` after enum variant payload").span;
+            variant.span = spanFrom(variant.span, end);
+        }
+        declaration.variants.push_back(std::move(variant));
+        if (!match(TokenKind::Comma) && !check(TokenKind::RightBrace)) {
+            errorAt(current(), "expected `,` or `}` after enum variant");
+            synchronizeStatement();
+        }
+    }
+
+    const auto end = expect(TokenKind::RightBrace, "expected `}` after enum declaration").span;
     declaration.span = spanFrom(start, end);
     return declaration;
 }
@@ -536,6 +575,7 @@ ast::ExprPtr Parser::parsePrefix() {
     if (check(TokenKind::KwWhile)) return parseWhileExpression();
     if (check(TokenKind::KwLoop)) return parseLoopExpression();
     if (check(TokenKind::KwFor)) return parseForExpression();
+    if (check(TokenKind::KwMatch)) return parseMatchExpression();
 
     if (isUnaryOperator(current().kind)) {
         const auto op = advance();
@@ -573,6 +613,23 @@ ast::ExprPtr Parser::parsePrimary() {
         }
         case TokenKind::Identifier: {
             advance();
+            if (check(TokenKind::ColonColon) && !checkNext(TokenKind::Less)) {
+                advance();
+                const auto& variant_token = expect(TokenKind::Identifier, "expected variant name after `::`");
+                auto expression = std::make_unique<ast::VariantExpr>(tokenText(token), tokenText(variant_token));
+                SourceSpan end = variant_token.span;
+                if (match(TokenKind::LeftParen)) {
+                    if (!check(TokenKind::RightParen)) {
+                        do {
+                            auto payload = parseExpression();
+                            if (payload) expression->payloads.push_back(std::move(payload));
+                        } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+                    }
+                    end = expect(TokenKind::RightParen, "expected `)` after enum variant payload").span;
+                }
+                expression->span = spanFrom(token.span, end);
+                return expression;
+            }
             if (looksLikeStructLiteral()) return parseStructLiteral(token);
             auto expression = std::make_unique<ast::IdentifierExpr>(tokenText(token));
             expression->span = token.span;
@@ -725,6 +782,14 @@ ast::ExprPtr Parser::parsePostfix(ast::ExprPtr expression) {
             continue;
         }
 
+        if (match(TokenKind::Question)) {
+            const auto end = previous().span;
+            auto try_expr = std::make_unique<ast::TryExpr>(std::move(expression));
+            try_expr->span = spanFrom(try_expr->operand->span, end);
+            expression = std::move(try_expr);
+            continue;
+        }
+
         break;
     }
 
@@ -804,6 +869,68 @@ ast::ExprPtr Parser::parseForExpression() {
 
     expression->body = parseBlock();
     expression->span = spanFrom(start, expression->body->span);
+    return expression;
+}
+
+ast::Pattern Parser::parsePattern() {
+    ast::Pattern pattern;
+    const auto start = current().span;
+    const auto& first = expect(TokenKind::Identifier, "expected pattern");
+    const std::string first_name = tokenText(first);
+    pattern.span = first.span;
+    if (first_name == "_") {
+        pattern.kind = ast::PatternKind::Wildcard;
+        pattern.name = "_";
+        return pattern;
+    }
+
+    if (match(TokenKind::ColonColon)) {
+        const auto& variant = expect(TokenKind::Identifier, "expected variant name after `::`");
+        pattern.kind = ast::PatternKind::Variant;
+        pattern.enum_name = first_name;
+        pattern.variant = tokenText(variant);
+        pattern.span = spanFrom(start, variant.span);
+    } else if (check(TokenKind::LeftParen)) {
+        pattern.kind = ast::PatternKind::Variant;
+        pattern.variant = first_name;
+    } else {
+        pattern.kind = ast::PatternKind::Name;
+        pattern.name = first_name;
+        return pattern;
+    }
+
+    if (match(TokenKind::LeftParen)) {
+        if (!check(TokenKind::RightParen)) {
+            do {
+                pattern.elements.push_back(parsePattern());
+            } while (match(TokenKind::Comma) && !check(TokenKind::RightParen));
+        }
+        const auto end = expect(TokenKind::RightParen, "expected `)` after variant pattern").span;
+        pattern.span = spanFrom(start, end);
+    }
+    return pattern;
+}
+
+ast::ExprPtr Parser::parseMatchExpression() {
+    const auto start = expect(TokenKind::KwMatch, "expected `match`").span;
+    auto expression = std::make_unique<ast::MatchExpr>();
+    expression->scrutinee = parseExpression();
+    expect(TokenKind::LeftBrace, "expected `{` after match value");
+
+    while (!check(TokenKind::RightBrace) && !isAtEnd()) {
+        ast::MatchArm arm;
+        arm.pattern = parsePattern();
+        expect(TokenKind::FatArrow, "expected `=>` after match pattern");
+        arm.value = parseExpression();
+        arm.span = arm.value ? spanFrom(arm.pattern.span, arm.value->span) : arm.pattern.span;
+        expression->arms.push_back(std::move(arm));
+        if (!match(TokenKind::Comma) && !check(TokenKind::RightBrace)) {
+            errorAt(current(), "expected `,` or `}` after match arm");
+            break;
+        }
+    }
+    const auto end = expect(TokenKind::RightBrace, "expected `}` after match expression").span;
+    expression->span = spanFrom(start, end);
     return expression;
 }
 
@@ -912,6 +1039,7 @@ bool Parser::isBlockLike(const ast::Expr& expression) noexcept {
         case ast::ExprKind::While:
         case ast::ExprKind::Loop:
         case ast::ExprKind::For:
+        case ast::ExprKind::Match:
             return true;
         default:
             return false;
