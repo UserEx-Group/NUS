@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.13.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.14.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -120,3 +120,19 @@ add_test(NAME iterators COMMAND nus_iterator_tests)
 add_executable(nus_iterator_native_tests tests/IteratorNativeTests.cpp)
 target_link_libraries(nus_iterator_native_tests PRIVATE nus_frontend)
 add_test(NAME iterator_native COMMAND nus_iterator_native_tests)
+
+add_executable(nus_lifetime_tests tests/LifetimeTests.cpp)
+target_link_libraries(nus_lifetime_tests PRIVATE nus_frontend)
+add_test(NAME lifetimes COMMAND nus_lifetime_tests)
+
+add_executable(nus_lifetime_native_tests tests/LifetimeNativeTests.cpp)
+target_link_libraries(nus_lifetime_native_tests PRIVATE nus_frontend)
+add_test(NAME lifetime_native COMMAND nus_lifetime_native_tests)
+
+add_executable(nus_borrowed_iterator_tests tests/BorrowedIteratorTests.cpp)
+target_link_libraries(nus_borrowed_iterator_tests PRIVATE nus_frontend)
+add_test(NAME borrowed_iterators COMMAND nus_borrowed_iterator_tests)
+
+add_executable(nus_borrowed_iterator_native_tests tests/BorrowedIteratorNativeTests.cpp)
+target_link_libraries(nus_borrowed_iterator_native_tests PRIVATE nus_frontend)
+add_test(NAME borrowed_iterator_native COMMAND nus_borrowed_iterator_native_tests)

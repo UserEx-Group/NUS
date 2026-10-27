@@ -66,14 +66,14 @@ int main() {
         }
     )");
 
-    expectError(R"(
+    expectValid(R"(
         fn main() {
             let literal = "owned";
             let mut values: Vec<string> = vec_new::<string>();
             values.push(string_clone(&literal));
             for value in values { print(value); }
         }
-    )", "requires a Copy element type");
+    )");
 
     expectError(R"(
         fn main() {

@@ -639,13 +639,13 @@ void testSharedReferenceCannotMutatePointee() {
     )"), "immutable");
 }
 
-void testReferenceReturnRejectedForNow() {
-    expectSemanticErrorContaining(check(R"(
+void testReferenceReturnElision() {
+    expectValid(check(R"(
         struct Packet { value: i32 }
         fn identity(packet: &Packet) -> &Packet {
             packet
         }
-    )"), "returning references is not supported");
+    )"));
 }
 
 void testReferenceFieldRejectedForNow() {
@@ -754,7 +754,7 @@ int main() {
     testConsumingMethodThroughReferenceRejected();
     testMutableReferenceCanMutatePointee();
     testSharedReferenceCannotMutatePointee();
-    testReferenceReturnRejectedForNow();
+    testReferenceReturnElision();
     testReferenceFieldRejectedForNow();
     testNonCopyArrayRepeatRejected();
     testStringMove();

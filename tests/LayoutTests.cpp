@@ -39,6 +39,11 @@ int main() {
     const auto iterator_layout = layouts.layoutOf(Type::vectorIterator(Type::simple(TypeKind::I32)));
     if (iterator_layout.size != 32 || iterator_layout.alignment != 8) fail("64-bit VecIter ABI must be four words");
 
+    const auto ref_iterator_layout = layouts.layoutOf(Type::borrowedVectorIterator(Type::simple(TypeKind::I32), false));
+    if (ref_iterator_layout.size != 24 || ref_iterator_layout.alignment != 8) fail("64-bit VecRefIter ABI must be three words");
+    const auto mut_iterator_layout = layouts.layoutOf(Type::borrowedVectorIterator(Type::simple(TypeKind::I32), true));
+    if (mut_iterator_layout.size != 24 || mut_iterator_layout.alignment != 8) fail("64-bit VecMutIter ABI must be three words");
+
     const auto packet_layout = layouts.layoutOfStruct("Packet");
     if (packet_layout.layout.size != 16 || packet_layout.layout.alignment != 8) fail("Packet layout mismatch");
     if (packet_layout.fields.size() != 3 || packet_layout.fields[0].offset != 0 ||
