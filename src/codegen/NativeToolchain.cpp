@@ -9,12 +9,11 @@
 #include <vector>
 
 #ifdef _WIN32
-    #ifndef NOMINMAX
-    #define NOMINMAX
-    #endif
-
-#include <windows.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <process.h>
+#include <windows.h>
 #else
 #include <cstdio>
 #include <sys/wait.h>
