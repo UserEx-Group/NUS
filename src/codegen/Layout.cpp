@@ -42,8 +42,8 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::U32:
         case TypeKind::F32:
         case TypeKind::Char:
-        case TypeKind::IpAddr:
-        case TypeKind::NetworkError: return {4, 4};
+        case TypeKind::IpAddr: return {4, 4};
+        case TypeKind::NetworkError: return {8, 4};
         case TypeKind::I64:
         case TypeKind::U64:
         case TypeKind::F64: return {8, 8};
@@ -52,6 +52,7 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::Reference:
         case TypeKind::Function:
         case TypeKind::TcpStream:
+        case TypeKind::TcpListener:
         case TypeKind::UdpSocket: return {pointer, pointer};
         case TypeKind::String:
         case TypeKind::Vec: return {pointer * 3U, pointer};

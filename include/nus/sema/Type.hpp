@@ -31,6 +31,7 @@ enum class TypeKind {
     SocketAddr,
     NetworkError,
     TcpStream,
+    TcpListener,
     UdpSocket,
     Vec,
     VecIter,

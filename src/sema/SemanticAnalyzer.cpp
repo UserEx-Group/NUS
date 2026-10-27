@@ -39,6 +39,7 @@ std::optional<TypeKind> simpleTypeKind(std::string_view name) {
     if (name == "SocketAddr") return TypeKind::SocketAddr;
     if (name == "NetworkError") return TypeKind::NetworkError;
     if (name == "TcpStream") return TypeKind::TcpStream;
+    if (name == "TcpListener") return TypeKind::TcpListener;
     if (name == "UdpSocket") return TypeKind::UdpSocket;
     return std::nullopt;
 }
@@ -256,6 +257,7 @@ void SemanticAnalyzer::registerBuiltins() {
     const Type socket_addr_type = Type::simple(TypeKind::SocketAddr);
     const Type network_error_type = Type::simple(TypeKind::NetworkError);
     const Type tcp_stream_type = Type::simple(TypeKind::TcpStream);
+    const Type tcp_listener_type = Type::simple(TypeKind::TcpListener);
     const Type udp_socket_type = Type::simple(TypeKind::UdpSocket);
     const Type bytes_buffer_type = Type::vector(u8_type);
     const Type vec_i32 = Type::vector(i32_type);
@@ -277,7 +279,13 @@ void SemanticAnalyzer::registerBuiltins() {
     builtin("socket_addr", {ip_type, u16_type}, socket_addr_type);
     builtin("socket_port", {Type::reference(socket_addr_type)}, u16_type);
     builtin("network_error_code", {Type::reference(network_error_type)}, i32_type);
+    builtin("network_error_reason", {Type::reference(network_error_type)}, i32_type);
+    builtin("dns_resolve_ipv4", {Type::reference(string_type)}, Type::result(ip_type, network_error_type));
     builtin("tcp_connect", {Type::reference(socket_addr_type)}, Type::result(tcp_stream_type, network_error_type));
+    builtin("tcp_listen", {Type::reference(socket_addr_type), i32_type, Type::simple(TypeKind::Bool)}, Type::result(tcp_listener_type, network_error_type));
+    builtin("tcp_accept", {Type::reference(tcp_listener_type, true)}, Type::result(tcp_stream_type, network_error_type));
+    builtin("tcp_set_nodelay", {Type::reference(tcp_stream_type, true), Type::simple(TypeKind::Bool)}, Type::result(i32_type, network_error_type));
+    builtin("tcp_set_timeout", {Type::reference(tcp_stream_type, true), Type::simple(TypeKind::U32)}, Type::result(i32_type, network_error_type));
     builtin("tcp_send", {Type::reference(tcp_stream_type, true), Type::reference(bytes_buffer_type)}, Type::result(usize_type, network_error_type));
     builtin("tcp_receive", {Type::reference(tcp_stream_type, true), usize_type}, Type::result(bytes_buffer_type, network_error_type));
     builtin("udp_bind", {Type::reference(socket_addr_type)}, Type::result(udp_socket_type, network_error_type));

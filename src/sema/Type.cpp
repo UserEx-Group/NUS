@@ -216,6 +216,7 @@ bool Type::isCopy() const noexcept {
         case TypeKind::VecRefIter:
         case TypeKind::VecMutIter:
         case TypeKind::TcpStream:
+        case TypeKind::TcpListener:
         case TypeKind::UdpSocket:
         case TypeKind::Struct:
         case TypeKind::Enum:
@@ -271,6 +272,7 @@ std::string Type::name() const {
         case TypeKind::SocketAddr: return "SocketAddr";
         case TypeKind::NetworkError: return "NetworkError";
         case TypeKind::TcpStream: return "TcpStream";
+        case TypeKind::TcpListener: return "TcpListener";
         case TypeKind::UdpSocket: return "UdpSocket";
         case TypeKind::Vec:
             return "Vec<" + (element ? element->name() : std::string("<unknown>")) + ">";
