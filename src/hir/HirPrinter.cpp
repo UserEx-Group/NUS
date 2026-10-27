@@ -17,6 +17,14 @@ std::string HirPrinter::print(const Program& program) const {
         line(out, 1, "Struct " + structure.name);
         for (const auto& field : structure.fields) line(out, 2, field.name + ": " + field.type.name());
     }
+    for (const auto& enumeration : program.enums) {
+        line(out, 1, "Enum " + enumeration.name);
+        for (const auto& variant : enumeration.variants) {
+            std::string text = "Variant " + std::to_string(variant.tag) + " " + variant.name;
+            for (const auto& payload : variant.payloads) text += " " + payload.name();
+            line(out, 2, text);
+        }
+    }
     for (const auto& function : program.functions) printFunction(function, out, 1);
     return out;
 }
@@ -102,6 +110,30 @@ void HirPrinter::printExpr(const Expr& expression, std::string& out, int depth) 
             for (const auto& field : expression.fields) {
                 line(out, depth + 1, "Field " + field.name);
                 printExpr(*field.value, out, depth + 2);
+            }
+            break;
+        case ExprKind::Variant:
+            line(out, depth, "Variant " + expression.text + suffix);
+            for (const auto& child : expression.operands) printExpr(*child, out, depth + 1);
+            break;
+        case ExprKind::Try:
+            line(out, depth, "Try" + suffix + " propagate-as " + expression.context_type.name());
+            for (const auto& child : expression.operands) printExpr(*child, out, depth + 1);
+            break;
+        case ExprKind::Match:
+            line(out, depth, "Match" + suffix);
+            if (!expression.operands.empty()) {
+                line(out, depth + 1, "Scrutinee");
+                printExpr(*expression.operands.front(), out, depth + 2);
+            }
+            for (const auto& arm : expression.match_arms) {
+                std::string pattern = "Arm ";
+                if (arm.pattern.kind == PatternKind::Wildcard) pattern += "_";
+                else if (arm.pattern.kind == PatternKind::Binding && arm.pattern.whole_binding) pattern += arm.pattern.whole_binding->name;
+                else pattern += arm.pattern.variant + "#" + std::to_string(arm.pattern.tag);
+                line(out, depth + 1, pattern);
+                for (const auto& binding : arm.pattern.bindings) line(out, depth + 2, "Bind " + localName(binding.local));
+                if (arm.value) printExpr(*arm.value, out, depth + 2);
             }
             break;
         case ExprKind::Block:

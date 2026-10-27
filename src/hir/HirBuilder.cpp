@@ -39,6 +39,8 @@ HirBuilder::HirBuilder(const sema::SemanticAnalyzer& semantic) : semantic_(seman
 Program HirBuilder::lower(const ast::SourceFile& file) {
     Program program;
     struct_types_.clear();
+    enum_types_.clear();
+    enum_variants_.clear();
     method_receivers_.clear();
     for (const auto& implementation : file.impls) {
         if (implementation.trait) continue;
@@ -57,6 +59,18 @@ Program HirBuilder::lower(const ast::SourceFile& file) {
     for (const auto& structure : file.structs) {
         struct_types_.emplace(structure.name, sema::Type::structure(structure.name));
     }
+    for (const auto& enumeration : file.enums) {
+        enum_types_.emplace(enumeration.name, sema::Type::enumeration(enumeration.name));
+    }
+    for (const auto& enumeration : file.enums) {
+        auto& variants = enum_variants_[enumeration.name];
+        std::size_t tag = 0;
+        for (const auto& variant : enumeration.variants) {
+            std::vector<sema::Type> payloads;
+            for (const auto& payload : variant.payload_types) payloads.push_back(lowerTypeRef(payload));
+            variants.emplace(variant.name, std::make_pair(tag++, std::move(payloads)));
+        }
+    }
 
     for (const auto& structure : file.structs) {
         Struct lowered;
@@ -70,6 +84,17 @@ Program HirBuilder::lower(const ast::SourceFile& file) {
             });
         }
         program.structs.push_back(std::move(lowered));
+    }
+    for (const auto& enumeration : file.enums) {
+        Enum lowered;
+        lowered.name = enumeration.name;
+        lowered.span = enumeration.span;
+        const auto& variants = enum_variants_.at(enumeration.name);
+        for (const auto& variant : enumeration.variants) {
+            const auto& info = variants.at(variant.name);
+            lowered.variants.push_back(EnumVariant{.name = variant.name, .tag = info.first, .payloads = info.second});
+        }
+        program.enums.push_back(std::move(lowered));
     }
 
     for (const auto& function : file.functions) {
@@ -105,6 +130,7 @@ Function HirBuilder::lowerFunction(const ast::FunctionDecl& function, std::strin
     lowered.owner_type = std::move(owner_type);
     lowered.span = function.span;
     lowered.return_type = function.return_type ? lowerTypeRef(*function.return_type) : unitType();
+    current_return_type_ = lowered.return_type;
 
     if (function.receiver != ast::ReceiverKind::None) {
         sema::Type receiver_type = sema::Type::structure(lowered.owner_type);
@@ -246,6 +272,82 @@ ExprPtr HirBuilder::lowerExpr(const ast::Expr& expression) {
             }
             break;
         }
+        case ast::ExprKind::Variant: {
+            const auto& node = static_cast<const ast::VariantExpr&>(expression);
+            result->kind = ExprKind::Variant;
+            result->text = node.enum_name + "::" + node.variant;
+            for (const auto& payload : node.payloads) result->operands.push_back(lowerExpr(*payload));
+            break;
+        }
+        case ast::ExprKind::Try: {
+            const auto& node = static_cast<const ast::TryExpr&>(expression);
+            result->kind = ExprKind::Try;
+            result->operands.push_back(lowerExpr(*node.operand));
+            result->context_type = current_return_type_;
+            break;
+        }
+        case ast::ExprKind::Match: {
+            const auto& node = static_cast<const ast::MatchExpr&>(expression);
+            result->kind = ExprKind::Match;
+            result->operands.push_back(lowerExpr(*node.scrutinee));
+            const sema::Type scrutinee = result->operands.front()->type;
+            auto variant_info = [&](const ast::Pattern& pattern) -> std::pair<std::size_t, std::vector<sema::Type>> {
+                const std::string name = pattern.kind == ast::PatternKind::Variant ? pattern.variant : pattern.name;
+                if (scrutinee.kind == sema::TypeKind::Option && scrutinee.element) {
+                    if (name == "Some") return {1, {*scrutinee.element}};
+                    return {0, {}};
+                }
+                if (scrutinee.kind == sema::TypeKind::Result && scrutinee.generic_arguments.size() == 2) {
+                    if (name == "Err") return {1, {scrutinee.generic_arguments[1]}};
+                    return {0, {scrutinee.generic_arguments[0]}};
+                }
+                if (scrutinee.kind == sema::TypeKind::Enum) {
+                    const auto e = enum_variants_.find(scrutinee.nominal_name);
+                    if (e != enum_variants_.end()) {
+                        const auto v = e->second.find(name);
+                        if (v != e->second.end()) return v->second;
+                    }
+                }
+                return {0, {}};
+            };
+            auto is_variant_name = [&](const std::string& name) {
+                if (scrutinee.kind == sema::TypeKind::Option) return name == "Some" || name == "None";
+                if (scrutinee.kind == sema::TypeKind::Result) return name == "Ok" || name == "Err";
+                if (scrutinee.kind == sema::TypeKind::Enum) {
+                    const auto e = enum_variants_.find(scrutinee.nominal_name);
+                    return e != enum_variants_.end() && e->second.contains(name);
+                }
+                return false;
+            };
+            for (const auto& arm : node.arms) {
+                pushScope();
+                MatchArm lowered_arm;
+                lowered_arm.span = arm.span;
+                if (arm.pattern.kind == ast::PatternKind::Wildcard) {
+                    lowered_arm.pattern.kind = PatternKind::Wildcard;
+                } else if (arm.pattern.kind == ast::PatternKind::Name && !is_variant_name(arm.pattern.name)) {
+                    lowered_arm.pattern.kind = PatternKind::Binding;
+                    const auto id = declareLocal(arm.pattern.name, scrutinee, false, arm.pattern.span);
+                    lowered_arm.pattern.whole_binding = localInfo(id);
+                } else {
+                    lowered_arm.pattern.kind = PatternKind::Variant;
+                    lowered_arm.pattern.enum_name = scrutinee.kind == sema::TypeKind::Enum ? scrutinee.nominal_name : scrutinee.name();
+                    lowered_arm.pattern.variant = arm.pattern.kind == ast::PatternKind::Variant ? arm.pattern.variant : arm.pattern.name;
+                    const auto [tag, payloads] = variant_info(arm.pattern);
+                    lowered_arm.pattern.tag = tag;
+                    for (std::size_t i = 0; i < arm.pattern.elements.size() && i < payloads.size(); ++i) {
+                        const auto& child = arm.pattern.elements[i];
+                        if (child.kind != ast::PatternKind::Name) continue;
+                        const auto id = declareLocal(child.name, payloads[i], false, child.span);
+                        lowered_arm.pattern.bindings.push_back(PatternBinding{.local = localInfo(id), .payload_index = i});
+                    }
+                }
+                lowered_arm.value = lowerExpr(*arm.value);
+                result->match_arms.push_back(std::move(lowered_arm));
+                popScope();
+            }
+            break;
+        }
         case ast::ExprKind::Block:
             return lowerBlock(static_cast<const ast::BlockExpr&>(expression));
         case ast::ExprKind::If: {
@@ -365,7 +467,8 @@ sema::Type HirBuilder::lowerTypeRef(const ast::TypeRef& type) const {
     } else if (name == "Result" && type.generic_arguments.size() == 2) {
         base = sema::Type::result(lowerTypeRef(type.generic_arguments[0]), lowerTypeRef(type.generic_arguments[1]));
     } else if (base.kind == sema::TypeKind::Unknown) {
-        base = sema::Type::structure(name);
+        if (const auto found = enum_types_.find(name); found != enum_types_.end()) base = found->second;
+        else base = sema::Type::structure(name);
     }
     if (type.is_reference) return sema::Type::reference(base, type.is_mutable_reference);
     return base;

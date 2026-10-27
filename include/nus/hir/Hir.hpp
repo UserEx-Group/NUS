@@ -38,6 +38,9 @@ enum class ExprKind {
     While,
     Loop,
     For,
+    Variant,
+    Match,
+    Try,
 };
 
 enum class StmtKind { Let, Return, Break, Continue, Expression };
@@ -53,6 +56,28 @@ struct Local {
 
 struct FieldInit {
     std::string name;
+    ExprPtr value;
+    SourceSpan span{};
+};
+
+enum class PatternKind { Wildcard, Binding, Variant };
+
+struct PatternBinding {
+    Local local;
+    std::size_t payload_index{0};
+};
+
+struct Pattern {
+    PatternKind kind{PatternKind::Wildcard};
+    std::string enum_name;
+    std::string variant;
+    std::size_t tag{0};
+    std::optional<Local> whole_binding;
+    std::vector<PatternBinding> bindings;
+};
+
+struct MatchArm {
+    Pattern pattern;
     ExprPtr value;
     SourceSpan span{};
 };
@@ -73,6 +98,8 @@ struct Expr {
     std::vector<StmtPtr> statements;
     ExprPtr tail;
     LocalId binding{InvalidLocalId};
+    sema::Type context_type;
+    std::vector<MatchArm> match_arms;
 };
 
 struct Stmt {
@@ -106,8 +133,21 @@ struct Struct {
     SourceSpan span{};
 };
 
+struct EnumVariant {
+    std::string name;
+    std::size_t tag{0};
+    std::vector<sema::Type> payloads;
+};
+
+struct Enum {
+    std::string name;
+    std::vector<EnumVariant> variants;
+    SourceSpan span{};
+};
+
 struct Program {
     std::vector<Struct> structs;
+    std::vector<Enum> enums;
     std::vector<Function> functions;
 };
 

@@ -38,8 +38,11 @@ private:
     std::vector<Local> locals_;
     LocalId next_local_{0};
     std::unordered_map<std::string, sema::Type> struct_types_;
+    std::unordered_map<std::string, sema::Type> enum_types_;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::pair<std::size_t, std::vector<sema::Type>>>> enum_variants_;
     std::unordered_map<std::string, ReceiverMode> method_receivers_;
     std::unordered_map<std::string, sema::Type> type_substitutions_;
+    sema::Type current_return_type_{sema::Type::simple(sema::TypeKind::Unit)};
 };
 
 } // namespace nus::hir
