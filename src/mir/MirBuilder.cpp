@@ -40,6 +40,8 @@ Function MirBuilder::lowerFunction(const hir::Function& source) {
     Function result;
     result.name = source.name;
     result.owner_type = source.owner_type;
+    result.is_async = source.is_async;
+    result.async_result_type = source.async_result_type;
     result.return_type = source.return_type;
     for (const auto& local : source.locals) {
         bool is_parameter = false;
@@ -61,6 +63,8 @@ Function MirBuilder::lowerFunction(const hir::Function& source) {
     result.entry = 0;
 
     function_ = &result;
+    current_async_ = source.is_async;
+    current_async_result_ = source.async_result_type;
     current_ = 0;
     loop_targets_.clear();
 
@@ -68,13 +72,22 @@ Function MirBuilder::lowerFunction(const hir::Function& source) {
     if (isOpen()) {
         Terminator ret;
         ret.kind = TerminatorKind::Return;
-        ret.value = source.return_type.isUnit() ? unitOperand() : tail;
+        if (current_async_) {
+            const LocalId ready = createTemp(source.return_type);
+            emit(Instruction{.kind = InstructionKind::MakeReadyFuture, .destination = ready,
+                             .operands = {source.async_result_type.isUnit() ? unitOperand() : tail}, .span = source.span});
+            ret.value = localOperand(ready);
+        } else {
+            ret.value = source.return_type.isUnit() ? unitOperand() : tail;
+        }
         terminate(std::move(ret));
     }
     for (auto& block : result.blocks) {
         if (!block.terminator) block.terminator = Terminator{.kind = TerminatorKind::Unreachable};
     }
     function_ = nullptr;
+    current_async_ = false;
+    current_async_result_ = unitType();
     return result;
 }
 
@@ -90,7 +103,9 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
             const Operand operand = lowerExpr(*expression.operands.at(0));
             const LocalId dest = createTemp(expression.type);
             Instruction inst;
-            inst.kind = expression.op == TokenKind::Ampersand ? InstructionKind::Borrow : InstructionKind::Unary;
+            if (expression.op == TokenKind::Ampersand) inst.kind = InstructionKind::Borrow;
+            else if (expression.op == TokenKind::KwAwait) inst.kind = InstructionKind::Await;
+            else inst.kind = InstructionKind::Unary;
             inst.destination = dest;
             inst.op = expression.op;
             inst.name = expression.flag ? "mut" : "";
@@ -359,7 +374,14 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
             emit(Instruction{.kind = InstructionKind::MakeVariant, .destination = propagated, .name = failure_variant,
                              .operands = std::move(failure_payloads), .span = expression.span});
             if (!container.isCopy()) emit(Instruction{.kind = InstructionKind::Consume, .operands = {source}, .span = expression.span});
-            terminate(Terminator{.kind = TerminatorKind::Return, .value = localOperand(propagated), .span = expression.span});
+            Operand propagated_return = localOperand(propagated);
+            if (current_async_) {
+                const LocalId ready = createTemp(function_->return_type);
+                emit(Instruction{.kind = InstructionKind::MakeReadyFuture, .destination = ready,
+                                 .operands = {propagated_return}, .span = expression.span});
+                propagated_return = localOperand(ready);
+            }
+            terminate(Terminator{.kind = TerminatorKind::Return, .value = propagated_return, .span = expression.span});
 
             switchTo(join);
             return localOperand(value_local);
@@ -477,7 +499,14 @@ void MirBuilder::lowerStmt(const hir::Stmt& statement) {
         }
         case hir::StmtKind::Return: {
             const Operand value = statement.value ? lowerExpr(*statement.value) : unitOperand();
-            terminate(Terminator{.kind = TerminatorKind::Return, .value = value, .span = statement.span});
+            if (current_async_) {
+                const LocalId ready = createTemp(function_->return_type);
+                emit(Instruction{.kind = InstructionKind::MakeReadyFuture, .destination = ready,
+                                 .operands = {value}, .span = statement.span});
+                terminate(Terminator{.kind = TerminatorKind::Return, .value = localOperand(ready), .span = statement.span});
+            } else {
+                terminate(Terminator{.kind = TerminatorKind::Return, .value = value, .span = statement.span});
+            }
             break;
         }
         case hir::StmtKind::Break: {

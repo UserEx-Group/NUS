@@ -33,6 +33,8 @@ enum class TypeKind {
     TcpStream,
     TcpListener,
     UdpSocket,
+    Reactor,
+    Future,
     Vec,
     VecIter,
     VecRefIter,
@@ -72,6 +74,7 @@ struct Type {
     [[nodiscard]] static Type borrowedVectorIterator(Type element, bool is_mutable = false);
     [[nodiscard]] static Type option(Type element);
     [[nodiscard]] static Type result(Type ok_type, Type error_type);
+    [[nodiscard]] static Type future(Type result_type);
     [[nodiscard]] static Type typeParameter(std::string name, std::vector<std::string> bounds = {});
     [[nodiscard]] static Type reference(Type element, bool is_mutable = false);
     [[nodiscard]] static Type function(std::vector<Type> parameters, Type result, bool variadic_any = false);

@@ -31,6 +31,8 @@ private:
     [[nodiscard]] Operand unitOperand() const;
 
     Function* function_{nullptr};
+    bool current_async_{false};
+    sema::Type current_async_result_{sema::Type::simple(sema::TypeKind::Unit)};
     BlockId current_{0};
     struct LoopTarget {
         BlockId break_block{InvalidBlockId};

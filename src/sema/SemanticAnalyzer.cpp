@@ -41,6 +41,7 @@ std::optional<TypeKind> simpleTypeKind(std::string_view name) {
     if (name == "TcpStream") return TypeKind::TcpStream;
     if (name == "TcpListener") return TypeKind::TcpListener;
     if (name == "UdpSocket") return TypeKind::UdpSocket;
+    if (name == "Reactor") return TypeKind::Reactor;
     return std::nullopt;
 }
 
@@ -259,6 +260,7 @@ void SemanticAnalyzer::registerBuiltins() {
     const Type tcp_stream_type = Type::simple(TypeKind::TcpStream);
     const Type tcp_listener_type = Type::simple(TypeKind::TcpListener);
     const Type udp_socket_type = Type::simple(TypeKind::UdpSocket);
+    const Type reactor_type = Type::simple(TypeKind::Reactor);
     const Type bytes_buffer_type = Type::vector(u8_type);
     const Type vec_i32 = Type::vector(i32_type);
 
@@ -291,6 +293,19 @@ void SemanticAnalyzer::registerBuiltins() {
     builtin("udp_bind", {Type::reference(socket_addr_type)}, Type::result(udp_socket_type, network_error_type));
     builtin("udp_send_to", {Type::reference(udp_socket_type, true), Type::reference(socket_addr_type), Type::reference(bytes_buffer_type)}, Type::result(usize_type, network_error_type));
     builtin("udp_receive", {Type::reference(udp_socket_type, true), usize_type}, Type::result(bytes_buffer_type, network_error_type));
+    // Milestone 17: non-blocking I/O and portable reactor foundation.
+    builtin("tcp_set_nonblocking", {Type::reference(tcp_stream_type, true), Type::simple(TypeKind::Bool)}, Type::result(i32_type, network_error_type));
+    builtin("tcp_listener_set_nonblocking", {Type::reference(tcp_listener_type, true), Type::simple(TypeKind::Bool)}, Type::result(i32_type, network_error_type));
+    builtin("udp_set_nonblocking", {Type::reference(udp_socket_type, true), Type::simple(TypeKind::Bool)}, Type::result(i32_type, network_error_type));
+    builtin("reactor_new", {}, Type::result(reactor_type, network_error_type));
+    builtin("reactor_len", {Type::reference(reactor_type)}, usize_type);
+    builtin("reactor_register_tcp", {Type::reference(reactor_type, true), Type::reference(tcp_stream_type), usize_type, Type::simple(TypeKind::Bool), Type::simple(TypeKind::Bool)}, Type::result(i32_type, network_error_type));
+    builtin("reactor_register_listener", {Type::reference(reactor_type, true), Type::reference(tcp_listener_type), usize_type}, Type::result(i32_type, network_error_type));
+    builtin("reactor_register_udp", {Type::reference(reactor_type, true), Type::reference(udp_socket_type), usize_type, Type::simple(TypeKind::Bool), Type::simple(TypeKind::Bool)}, Type::result(i32_type, network_error_type));
+    builtin("reactor_wait", {Type::reference(reactor_type, true), i32_type}, Type::result(usize_type, network_error_type));
+    builtin("reactor_event_token", {Type::reference(reactor_type), usize_type}, usize_type);
+    builtin("reactor_event_readable", {Type::reference(reactor_type), usize_type}, Type::simple(TypeKind::Bool));
+    builtin("reactor_event_writable", {Type::reference(reactor_type), usize_type}, Type::simple(TypeKind::Bool));
     // Compatibility shims from milestone 10. New code should use the generic builtins below.
     builtin("vec_new_i32", {}, vec_i32);
     builtin("vec_push_i32", {Type::reference(vec_i32, true), i32_type}, unitType());
@@ -312,6 +327,7 @@ void SemanticAnalyzer::registerBuiltins() {
     registerGenericBuiltin("none", {gp_t}, Type::function({}, Type::option(t)), "__builtin_none");
     registerGenericBuiltin("ok", {gp_t, gp_e}, Type::function({t}, Type::result(t, e)), "__builtin_ok");
     registerGenericBuiltin("err", {gp_t, gp_e}, Type::function({e}, Type::result(t, e)), "__builtin_err");
+    registerGenericBuiltin("block_on", {gp_t}, Type::function({Type::future(t)}, t), "__builtin_block_on");
 }
 
 void SemanticAnalyzer::registerGenericBuiltin(std::string name, std::vector<ast::GenericParameter> parameters,
@@ -598,8 +614,16 @@ void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
                 }
             }
         }
-        Type signature = Type::function(std::move(parameters), result);
+        if (function.is_async && result.containsReference()) {
+            error(function.return_type ? function.return_type->span : function.span,
+                  "async functions cannot return borrowed references in milestone 17");
+        }
+        const Type public_result = function.is_async ? Type::future(result) : result;
+        Type signature = Type::function(std::move(parameters), public_result);
         function_signatures_.insert_or_assign(&function, signature);
+        if (function.is_async && function.name == "main") {
+            error(function.span, "`main` cannot be async until the executor entry point is implemented");
+        }
 
         if (!function.generic_parameters.empty()) {
             if (symbols_.lookup(function.name) || generic_functions_.contains(function.name)) {
@@ -736,7 +760,12 @@ void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
     const Type signature = signature_it != function_signatures_.end()
                                ? signature_it->second
                                : Type::function({}, unitType());
-    current_return_type_ = signature.return_type ? *signature.return_type : unitType();
+    current_async_function_ = function.is_async;
+    if (function.is_async && signature.return_type && signature.return_type->kind == TypeKind::Future && signature.return_type->element) {
+        current_return_type_ = *signature.return_type->element;
+    } else {
+        current_return_type_ = signature.return_type ? *signature.return_type : unitType();
+    }
     loop_depth_ = 0;
     return_reference_roots_.clear();
     if (current_return_type_.isReference()) {
@@ -783,6 +812,8 @@ void SemanticAnalyzer::analyzeMethod(const Type& target_type, const ast::Functio
     const Type signature = signature_it != function_signatures_.end()
                                ? signature_it->second
                                : Type::function({}, unitType());
+    current_async_function_ = false;
+    if (method.is_async) error(method.span, "async methods are not supported in milestone 17 yet");
     current_return_type_ = signature.return_type ? *signature.return_type : unitType();
     loop_depth_ = 0;
     return_reference_roots_.clear();
@@ -884,6 +915,12 @@ Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
             return errorType();
         }
         base = Type::result(resolveType(type_ref.generic_arguments[0]), resolveType(type_ref.generic_arguments[1]));
+    } else if (base_name == "Future") {
+        if (type_ref.generic_arguments.size() != 1) {
+            error(type_ref.span, "`Future` expects exactly one type argument");
+            return errorType();
+        }
+        base = Type::future(resolveType(type_ref.generic_arguments.front()));
     } else if (const auto kind = simpleTypeKind(base_name)) {
         if (!type_ref.generic_arguments.empty()) {
             error(type_ref.span, "type `" + base_name + "` does not accept generic arguments");
@@ -952,6 +989,8 @@ Type SemanticAnalyzer::resolveTraitType(const ast::TypeRef& type_ref, const Type
         } else if (name == "Result" && type_ref.generic_arguments.size() == 2) {
             base = Type::result(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types),
                                 resolveTraitType(type_ref.generic_arguments[1], self_type, associated_types));
+        } else if (name == "Future" && type_ref.generic_arguments.size() == 1) {
+            base = Type::future(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types));
         } else if (const auto kind = simpleTypeKind(name)) {
             if (!type_ref.generic_arguments.empty()) {
                 error(type_ref.span, "type `" + name + "` does not accept generic arguments");
@@ -984,6 +1023,7 @@ Type SemanticAnalyzer::instantiateType(const Type& type, const std::unordered_ma
     if (type.kind == TypeKind::VecRefIter && type.element) return Type::borrowedVectorIterator(instantiateType(*type.element, substitutions), false);
     if (type.kind == TypeKind::VecMutIter && type.element) return Type::borrowedVectorIterator(instantiateType(*type.element, substitutions), true);
     if (type.kind == TypeKind::Option && type.element) return Type::option(instantiateType(*type.element, substitutions));
+    if (type.kind == TypeKind::Future && type.element) return Type::future(instantiateType(*type.element, substitutions));
     if (type.kind == TypeKind::Array && type.element) return Type::array(instantiateType(*type.element, substitutions), type.array_length);
     if (type.kind == TypeKind::Slice && type.element) return Type::slice(instantiateType(*type.element, substitutions));
     if (type.kind == TypeKind::Range && type.element) return Type::range(instantiateType(*type.element, substitutions));
@@ -1028,6 +1068,7 @@ bool SemanticAnalyzer::inferGeneric(const Type& pattern, const Type& actual,
         case TypeKind::VecRefIter:
         case TypeKind::VecMutIter:
         case TypeKind::Option:
+        case TypeKind::Future:
         case TypeKind::Array:
         case TypeKind::Slice:
         case TypeKind::Range:
@@ -1425,8 +1466,15 @@ Type SemanticAnalyzer::checkUnary(const ast::UnaryExpr& expression) {
             }
             return *operand.element;
         case TokenKind::KwAwait:
-            error(expression.span, "`await` semantic analysis is not implemented yet");
-            return errorType();
+            if (!current_async_function_) {
+                error(expression.span, "`await` is only allowed inside an async function");
+                return errorType();
+            }
+            if (operand.kind != TypeKind::Future || !operand.element) {
+                error(expression.span, "`await` requires a Future<T>, found `" + operand.name() + "`");
+                return errorType();
+            }
+            return *operand.element;
         default:
             error(expression.span, "unsupported unary operator");
             return errorType();

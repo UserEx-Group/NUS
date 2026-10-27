@@ -203,6 +203,7 @@ private:
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_map<std::string, EnumInfo> enums_;
     Type current_return_type_{Type::simple(TypeKind::Unit)};
+    bool current_async_function_{false};
     int loop_depth_{0};
 
     std::size_t next_symbol_id_{1};

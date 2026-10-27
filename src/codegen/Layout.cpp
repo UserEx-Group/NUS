@@ -54,12 +54,20 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::TcpStream:
         case TypeKind::TcpListener:
         case TypeKind::UdpSocket: return {pointer, pointer};
+        case TypeKind::Reactor: return {pointer * 3U, pointer};
         case TypeKind::String:
         case TypeKind::Vec: return {pointer * 3U, pointer};
         case TypeKind::SocketAddr: return {8, 4};
         case TypeKind::VecIter: return {pointer * 4U, pointer};
         case TypeKind::VecRefIter:
         case TypeKind::VecMutIter: return {pointer * 3U, pointer};
+        case TypeKind::Future: {
+            if (!type.element) throw std::runtime_error("layout: malformed Future");
+            if (type.element->isUnit()) return {1, 1};
+            const auto payload = layoutOf(*type.element);
+            const std::size_t offset = alignTo(1, payload.alignment);
+            return {alignTo(offset + payload.size, payload.alignment), payload.alignment};
+        }
         case TypeKind::Option: {
             if (!type.element) throw std::runtime_error("layout: malformed Option");
             const auto payload = layoutOf(*type.element);

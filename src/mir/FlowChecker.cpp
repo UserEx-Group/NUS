@@ -105,6 +105,10 @@ std::vector<LocalId> consumedByInstruction(const Instruction& instruction) {
         case InstructionKind::IterInit:
             if (!instruction.operands.empty()) consume(instruction.operands.front());
             break;
+        case InstructionKind::MakeReadyFuture:
+        case InstructionKind::Await:
+            if (!instruction.operands.empty()) consume(instruction.operands.front());
+            break;
         case InstructionKind::Consume:
             if (!instruction.operands.empty()) consume(instruction.operands.front());
             break;
@@ -152,9 +156,11 @@ bool stateEqual(const StateVector& a, const StateVector& b) { return a == b; }
 
 std::vector<const Loan*> activeLoans(const FunctionFlowInfo& info,
                                      const LocalSet& live,
-                                     const std::unordered_map<std::size_t, std::set<LocalId>>& carriers) {
+                                     const std::unordered_map<std::size_t, std::set<LocalId>>& carriers,
+                                     const std::set<std::size_t>& activated_pins) {
     std::vector<const Loan*> result;
     for (const auto& loan : info.loans) {
+        if (loan.is_pin && !activated_pins.contains(loan.id)) continue;
         const auto found = carriers.find(loan.id);
         if (found == carriers.end()) continue;
         bool active = false;
@@ -171,8 +177,23 @@ std::vector<const Loan*> activeLoans(const FunctionFlowInfo& info,
 
 bool hasLoanForRoot(const std::vector<const Loan*>& loans, LocalId root, bool require_mutable = false) {
     return std::any_of(loans.begin(), loans.end(), [&](const Loan* loan) {
-        return loan->root == root && (!require_mutable || loan->is_mutable);
+        if (loan->is_pin || loan->root != root) return false;
+        return !require_mutable || loan->is_mutable;
     });
+}
+
+bool hasProtectionForRoot(const std::vector<const Loan*>& loans, LocalId root) {
+    return std::any_of(loans.begin(), loans.end(), [&](const Loan* loan) {
+        return loan->root == root;
+    });
+}
+
+bool isReactorRegistration(const Instruction& instruction) {
+    if (instruction.kind != InstructionKind::Call || instruction.operands.empty()) return false;
+    const auto& callee = instruction.operands.front();
+    if (callee.kind != OperandKind::Global) return false;
+    return callee.text == "reactor_register_tcp" || callee.text == "reactor_register_listener" ||
+           callee.text == "reactor_register_udp";
 }
 
 void addDiagnostic(std::vector<Diagnostic>& diagnostics, SourceSpan span, std::string message) {
@@ -227,6 +248,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                 .root = source.local,
                 .reference = *instruction.destination,
                 .is_mutable = instruction.name == "mut",
+                .is_pin = false,
                 .span = instruction.span,
             };
             local_loans[*instruction.destination].insert(loan.id);
@@ -234,46 +256,160 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
         }
     }
 
-    // Propagate loan identity through reference values and borrow-carrying iterators.
+    // Propagate loan identity through reference values and borrow-carrying values.
     // This is the MIR-level lifetime provenance used by NLL: a call such as
     // `values.iter()` receives a temporary &Vec<T>, but the resulting iterator
-    // keeps that same loan alive until the iterator's last use.
-    bool loan_changed = true;
-    while (loan_changed) {
-        loan_changed = false;
-        for (const auto& block : function.blocks) {
-            for (const auto& instruction : block.instructions) {
-                if (!instruction.destination) continue;
-                const Local* destination = findLocal(function, *instruction.destination);
-                if (!destination || !destination->type.carriesBorrow()) continue;
+    // keeps that same loan alive until the iterator's last use. Reactor values
+    // also carry synthetic resource pins created below.
+    auto propagateLoans = [&]() {
+        bool loan_changed = true;
+        while (loan_changed) {
+            loan_changed = false;
+            for (const auto& block : function.blocks) {
+                for (const auto& instruction : block.instructions) {
+                    if (!instruction.destination) continue;
+                    const Local* destination = findLocal(function, *instruction.destination);
+                    if (!destination || !destination->type.carriesBorrow()) continue;
 
-                std::size_t first_source = 0;
-                bool propagates = instruction.kind == InstructionKind::Assign ||
-                                  instruction.kind == InstructionKind::IterInit ||
-                                  instruction.kind == InstructionKind::IterNext;
-                if (instruction.kind == InstructionKind::Call) {
-                    propagates = true;
-                    first_source = 1; // operand 0 is the callee
-                }
-                if (!propagates) continue;
+                    std::size_t first_source = 0;
+                    bool propagates = instruction.kind == InstructionKind::Assign ||
+                                      instruction.kind == InstructionKind::IterInit ||
+                                      instruction.kind == InstructionKind::IterNext;
+                    if (instruction.kind == InstructionKind::Call) {
+                        propagates = true;
+                        first_source = 1; // operand 0 is the callee
+                    }
+                    if (!propagates) continue;
 
-                auto& target = local_loans[*instruction.destination];
-                const auto old_size = target.size();
-                for (std::size_t i = first_source; i < instruction.operands.size(); ++i) {
-                    const auto& source = instruction.operands[i];
-                    if (source.kind != OperandKind::Local) continue;
-                    const auto source_found = local_loans.find(source.local);
-                    if (source_found == local_loans.end()) continue;
-                    target.insert(source_found->second.begin(), source_found->second.end());
+                    auto& target = local_loans[*instruction.destination];
+                    const auto old_size = target.size();
+                    for (std::size_t i = first_source; i < instruction.operands.size(); ++i) {
+                        const auto& source = instruction.operands[i];
+                        if (source.kind != OperandKind::Local) continue;
+                        const auto source_found = local_loans.find(source.local);
+                        if (source_found == local_loans.end()) continue;
+                        target.insert(source_found->second.begin(), source_found->second.end());
+                    }
+                    if (target.size() != old_size) loan_changed = true;
                 }
-                if (target.size() != old_size) loan_changed = true;
+            }
+        }
+    };
+
+    propagateLoans();
+
+    // A Reactor stores operating-system handles, but it must not impose a Rust-style
+    // shared borrow on a registered socket: callers still need `&mut TcpStream` for
+    // send/receive after readiness. Instead registration creates an internal resource
+    // pin. A pin prevents move/drop/reassignment of the registered owner while the
+    // Reactor is live, but it deliberately does not participate in ordinary borrow
+    // conflicts.
+    struct PinSite {
+        BlockId block{InvalidBlockId};
+        std::size_t instruction{0};
+        std::size_t loan{0};
+    };
+    std::vector<PinSite> pin_sites;
+
+    auto rootsForCarrier = [&](LocalId local, bool pins_allowed) {
+        std::set<LocalId> roots;
+        const auto found = local_loans.find(local);
+        if (found == local_loans.end()) return roots;
+        for (const auto loan_id : found->second) {
+            if (loan_id >= info.loans.size()) continue;
+            const auto& loan = info.loans[loan_id];
+            if (!pins_allowed && loan.is_pin) continue;
+            roots.insert(loan.root);
+        }
+        return roots;
+    };
+
+    for (const auto& block : function.blocks) {
+        for (std::size_t instruction_index = 0; instruction_index < block.instructions.size(); ++instruction_index) {
+            const auto& instruction = block.instructions[instruction_index];
+            if (!isReactorRegistration(instruction) || instruction.operands.size() < 3) continue;
+            const auto& reactor_ref = instruction.operands[1];
+            const auto& resource_ref = instruction.operands[2];
+            if (reactor_ref.kind != OperandKind::Local || resource_ref.kind != OperandKind::Local) continue;
+
+            const auto reactor_roots = rootsForCarrier(reactor_ref.local, false);
+            const auto resource_roots = rootsForCarrier(resource_ref.local, false);
+            if (reactor_roots.empty() || resource_roots.empty()) {
+                addDiagnostic(diagnostics, instruction.span,
+                              "reactor registration requires directly traceable borrowed resources in milestone 17");
+                continue;
+            }
+
+            for (const auto reactor_root : reactor_roots) {
+                const Local* reactor_local = findLocal(function, reactor_root);
+                if (!reactor_local || reactor_local->type.kind != sema::TypeKind::Reactor) continue;
+                for (const auto resource_root : resource_roots) {
+                    Loan pin{
+                        .id = next_loan++,
+                        .root = resource_root,
+                        .reference = reactor_root,
+                        .is_mutable = false,
+                        .is_pin = true,
+                        .span = instruction.span,
+                    };
+                    info.loans.push_back(pin);
+                    local_loans[reactor_root].insert(pin.id);
+                    pin_sites.push_back(PinSite{
+                        .block = block.id,
+                        .instruction = instruction_index,
+                        .loan = pin.id,
+                    });
+                }
             }
         }
     }
 
+    // A Reactor can itself move after registration; propagate its pins to the new owner.
+    propagateLoans();
+
     std::unordered_map<std::size_t, std::set<LocalId>> carriers;
     for (const auto& [local, loans] : local_loans) {
         for (const auto loan : loans) carriers[loan].insert(local);
+    }
+
+    // Pins begin only after a successful registration call is attempted. Track that
+    // program point with a may-dataflow so a Reactor that crosses branches/loops keeps
+    // protecting every handle that may already have been registered.
+    std::unordered_map<BlockId, std::set<std::size_t>> pins_in;
+    std::unordered_map<BlockId, std::set<std::size_t>> pins_out;
+    std::unordered_map<BlockId, std::unordered_map<std::size_t, std::set<std::size_t>>> pins_created_at;
+    for (const auto& block : function.blocks) {
+        pins_in[block.id] = {};
+        pins_out[block.id] = {};
+    }
+    for (const auto& site : pin_sites) pins_created_at[site.block][site.instruction].insert(site.loan);
+
+    const auto pin_preds = predecessors(function);
+    bool pins_changed = true;
+    while (pins_changed) {
+        pins_changed = false;
+        for (const auto& block : function.blocks) {
+            std::set<std::size_t> incoming;
+            if (block.id != function.entry) {
+                if (const auto it = pin_preds.find(block.id); it != pin_preds.end()) {
+                    for (const auto pred : it->second) {
+                        const auto& predecessor_pins = pins_out[pred];
+                        incoming.insert(predecessor_pins.begin(), predecessor_pins.end());
+                    }
+                }
+            }
+            auto outgoing = incoming;
+            if (const auto created_block = pins_created_at.find(block.id); created_block != pins_created_at.end()) {
+                for (const auto& [_, created] : created_block->second) {
+                    outgoing.insert(created.begin(), created.end());
+                }
+            }
+            if (pins_in[block.id] != incoming || pins_out[block.id] != outgoing) {
+                pins_in[block.id] = std::move(incoming);
+                pins_out[block.id] = std::move(outgoing);
+                pins_changed = true;
+            }
+        }
     }
 
     // Move/uninitialized forward dataflow.
@@ -322,10 +458,11 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
         const auto live_it = info.liveness.blocks.find(block.id);
         if (live_it == info.liveness.blocks.end()) continue;
         const auto& live = live_it->second;
+        auto activated_pins = pins_in[block.id];
 
         for (std::size_t i = 0; i < block.instructions.size(); ++i) {
             const auto& instruction = block.instructions[i];
-            const auto active = activeLoans(info, live.live_before[i], carriers);
+            const auto active = activeLoans(info, live.live_before[i], carriers, activated_pins);
 
             // All ordinary operand reads require the source value to be available.
             for (const auto& operand : instruction.operands) checkAvailableUse(function, state, operand, instruction.span, diagnostics);
@@ -351,17 +488,17 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
 
             // Direct writes to an owner conflict with any live loan of that owner.
             if (instruction.kind == InstructionKind::Assign && instruction.destination &&
-                hasLoanForRoot(active, *instruction.destination)) {
+                hasProtectionForRoot(active, *instruction.destination)) {
                 if (const Local* local = findLocal(function, *instruction.destination)) {
-                    addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed");
+                    addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed or reactor-pinned");
                 }
             }
             if ((instruction.kind == InstructionKind::StoreMember || instruction.kind == InstructionKind::StoreIndex || instruction.kind == InstructionKind::StoreDeref) &&
                 !instruction.operands.empty() && instruction.operands.front().kind == OperandKind::Local) {
                 const auto root = instruction.operands.front().local;
-                if (hasLoanForRoot(active, root)) {
+                if (hasProtectionForRoot(active, root)) {
                     if (const Local* local = findLocal(function, root)) {
-                        addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed");
+                        addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed or reactor-pinned");
                     }
                 }
             }
@@ -379,14 +516,19 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
             }
 
             for (const auto moved : consumedByInstruction(instruction)) {
-                if (hasLoanForRoot(active, moved)) {
+                if (hasProtectionForRoot(active, moved)) {
                     if (const Local* local = findLocal(function, moved)) {
-                        addDiagnostic(diagnostics, instruction.span, "cannot move `" + local->name + "` while it is borrowed");
+                        addDiagnostic(diagnostics, instruction.span, "cannot move `" + local->name + "` while it is borrowed or reactor-pinned");
                     }
                 }
             }
 
             transferInstruction(state, instruction);
+            if (const auto block_created = pins_created_at.find(block.id); block_created != pins_created_at.end()) {
+                if (const auto at = block_created->second.find(i); at != block_created->second.end()) {
+                    activated_pins.insert(at->second.begin(), at->second.end());
+                }
+            }
         }
 
         info.definitely_available_before_terminator[block.id] = LocalSet{};
@@ -402,14 +544,14 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
         }
 
         if (block.terminator) {
-            const auto active = activeLoans(info, live.terminator_live_before, carriers);
+            const auto active = activeLoans(info, live.terminator_live_before, carriers, activated_pins);
             if (block.terminator->kind == TerminatorKind::Return) {
                 checkAvailableUse(function, state, block.terminator->value, block.terminator->span, diagnostics);
                 for (const auto moved : consumedByTerminator(*block.terminator)) {
-                    if (hasLoanForRoot(active, moved)) {
+                    if (hasProtectionForRoot(active, moved)) {
                         if (const Local* local = findLocal(function, moved)) {
                             addDiagnostic(diagnostics, block.terminator->span,
-                                          "cannot move `" + local->name + "` while it is borrowed");
+                                          "cannot move `" + local->name + "` while it is borrowed or reactor-pinned");
                         }
                     }
                 }

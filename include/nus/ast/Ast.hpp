@@ -277,6 +277,7 @@ enum class ReceiverKind { None, Value, Reference, MutableReference };
 
 struct FunctionDecl : Node {
     std::string name;
+    bool is_async{false};
     std::vector<GenericParameter> generic_parameters;
     ReceiverKind receiver{ReceiverKind::None};
     SourceSpan receiver_span{};

@@ -96,7 +96,7 @@ ast::SourceFile Parser::parseSourceFile() {
     }
 
     while (!isAtEnd()) {
-        if (check(TokenKind::KwFn)) {
+        if (check(TokenKind::KwFn) || (check(TokenKind::KwAsync) && checkNext(TokenKind::KwFn))) {
             if (auto function = parseFunction()) file.functions.push_back(std::move(*function));
             else synchronizeTopLevel();
             continue;
@@ -122,7 +122,7 @@ ast::SourceFile Parser::parseSourceFile() {
             continue;
         }
 
-        errorAt(current(), "expected top-level declaration (`fn`, `struct`, `enum`, `trait`, or `impl`)");
+        errorAt(current(), "expected top-level declaration (`fn`, `async fn`, `struct`, `enum`, `trait`, or `impl`)");
         synchronizeTopLevel();
     }
 
@@ -130,11 +130,20 @@ ast::SourceFile Parser::parseSourceFile() {
 }
 
 std::optional<ast::FunctionDecl> Parser::parseFunction(bool allow_receiver, bool require_body) {
-    const auto start = expect(TokenKind::KwFn, "expected `fn`").span;
+    SourceSpan start{};
+    bool is_async = false;
+    if (match(TokenKind::KwAsync)) {
+        start = previous().span;
+        is_async = true;
+        expect(TokenKind::KwFn, "expected `fn` after `async`");
+    } else {
+        start = expect(TokenKind::KwFn, "expected `fn`").span;
+    }
     const auto& name = expect(TokenKind::Identifier, "expected function name");
 
     ast::FunctionDecl function;
     function.name = tokenText(name);
+    function.is_async = is_async;
     function.generic_parameters = parseGenericParameters();
 
     expect(TokenKind::LeftParen, "expected `(` after function name");

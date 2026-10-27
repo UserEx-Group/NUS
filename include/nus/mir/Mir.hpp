@@ -48,6 +48,8 @@ enum class InstructionKind {
     StoreDeref,
     Drop,
     DropIf,
+    MakeReadyFuture,
+    Await,
 };
 
 struct Instruction {
@@ -89,6 +91,8 @@ struct Local {
 
 struct Function {
     std::string name;
+    bool is_async{false};
+    sema::Type async_result_type{sema::Type::simple(sema::TypeKind::Unit)};
     std::string owner_type;
     std::vector<Local> locals;
     std::vector<BasicBlock> blocks;

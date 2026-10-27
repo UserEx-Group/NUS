@@ -87,7 +87,7 @@ void AstPrinter::printImpl(const ImplDecl& declaration, std::string& out, int de
 }
 
 void AstPrinter::printFunction(const FunctionDecl& function, std::string& out, int depth) const {
-    line(out, depth, "FunctionDecl " + function.name);
+    line(out, depth, std::string(function.is_async ? "AsyncFunctionDecl " : "FunctionDecl ") + function.name);
     for (const auto& generic : function.generic_parameters) {
         std::string text = "Generic " + generic.name;
         if (!generic.bounds.empty()) {

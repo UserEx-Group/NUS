@@ -212,6 +212,13 @@ private:
     void builtinUdpBind(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinUdpSendTo(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinUdpReceive(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinSetNonblocking(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments, sema::TypeKind socket_kind);
+    void builtinReactorNew(const mir::Instruction& inst);
+    void builtinReactorLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinReactorRegister(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments, sema::TypeKind socket_kind, bool listener_only);
+    void builtinReactorWait(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinReactorEventToken(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinReactorEventReady(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments, bool writable);
     [[nodiscard]] std::string emitSockaddrIn(const Value& address);
     [[nodiscard]] Value emitNetworkResult(const sema::Type& result_type, bool is_error, const Value& payload);
     [[nodiscard]] Value emitNetworkError(int code, std::optional<int> fixed_reason = std::nullopt);
@@ -233,7 +240,7 @@ public:
 
     std::string run() {
         std::ostringstream out;
-        out << "; NUS LLVM IR - milestone 16\n";
+        out << "; NUS LLVM IR - milestone 17\n";
         out << "; target: " << target_.description() << "\n";
         if (!target_.triple.empty()) out << "target triple = \"" << target_.triple << "\"\n";
         out << "\n";
@@ -263,6 +270,8 @@ public:
             out << "declare i32 @sendto(i64, ptr, i32, i32, ptr, i32)\n";
             out << "declare i32 @recv(i64, ptr, i32, i32)\n";
             out << "declare i32 @closesocket(i64)\n";
+            out << "declare i32 @ioctlsocket(i64, i32, ptr)\n";
+            out << "declare i32 @WSAPoll(ptr, i32, i32)\n";
         } else {
             out << "declare i32 @socket(i32, i32, i32)\n";
             out << "declare i32 @connect(i32, ptr, i32)\n";
@@ -274,12 +283,16 @@ public:
             out << "declare i64 @sendto(i32, ptr, i64, i32, ptr, i32)\n";
             out << "declare i64 @recv(i32, ptr, i64, i32)\n";
             out << "declare i32 @close(i32)\n";
+            out << "declare i32 @fcntl(i32, i32, ...)\n";
+            if (darwinTarget()) out << "declare i32 @poll(ptr, i32, i32)\n";
+            else out << "declare i32 @poll(ptr, " << usizeType() << ", i32)\n";
             if (darwinTarget()) out << "declare ptr @__error()\n";
             else out << "declare ptr @__errno_location()\n";
         }
         out << "\n";
         emitNetworkInitHelper(out);
         emitNetworkErrorHelpers(out);
+        emitReactorHelpers(out);
         emitAssertHelper(out);
         for (const auto& function : program_.functions) FunctionEmitter(*this, function, out).emit();
         emitMainWrapper(out);
@@ -312,6 +325,11 @@ public:
             case TypeKind::TcpStream: return "%nus.tcpstream";
             case TypeKind::TcpListener: return "%nus.tcplistener";
             case TypeKind::UdpSocket: return "%nus.udpsocket";
+            case TypeKind::Reactor: return "%nus.reactor";
+            case TypeKind::Future:
+                if (!type.element) throw std::runtime_error("LLVM codegen: malformed Future type");
+                if (type.element->isUnit()) return "{ i1 }";
+                return "{ i1, " + llvmType(*type.element) + " }";
             case TypeKind::Vec:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Vec type");
                 return "{ ptr, " + usizeType() + ", " + usizeType() + " }";
@@ -425,6 +443,10 @@ private:
         out << "%nus.tcpstream = type { i64 }\n";
         out << "%nus.tcplistener = type { i64 }\n";
         out << "%nus.udpsocket = type { i64 }\n";
+        out << "%nus.reactor.entry = type { i64, i16, i16, " << usizeType() << " }\n";
+        out << "%nus.reactor = type { ptr, " << usizeType() << ", " << usizeType() << " }\n";
+        if (windowsTarget()) out << "%nus.os.pollfd = type { i64, i16, i16 }\n";
+        else out << "%nus.os.pollfd = type { i32, i16, i16 }\n";
         out << "%nus.hostent = type { ptr, ptr, i32, i32, ptr }\n";
         out << "%nus.timeval = type { i64, i64 }\n";
         out << "%nus.sockaddr.in = type { i16, i16, i32, [8 x i8] }\n";
@@ -528,6 +550,132 @@ private:
         out << "  ret i32 %rc\n";
         out << "ready:\n";
         out << "  ret i32 0\n";
+        out << "}\n\n";
+    }
+
+    void emitReactorHelpers(std::ostringstream& out) const {
+        const std::string usize = usizeType();
+        out << "define internal i32 @nus_reactor_register(ptr %reactor, i64 %handle, " << usize << " %token, i16 %events) {\n";
+        out << "entry:\n";
+        out << "  %data.ptr = getelementptr inbounds %nus.reactor, ptr %reactor, i32 0, i32 0\n";
+        out << "  %len.ptr = getelementptr inbounds %nus.reactor, ptr %reactor, i32 0, i32 1\n";
+        out << "  %cap.ptr = getelementptr inbounds %nus.reactor, ptr %reactor, i32 0, i32 2\n";
+        out << "  %data = load ptr, ptr %data.ptr\n";
+        out << "  %len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %cap = load " << usize << ", ptr %cap.ptr\n";
+        out << "  %need = add " << usize << " %len, 1\n";
+        out << "  %grow = icmp ugt " << usize << " %need, %cap\n";
+        out << "  br i1 %grow, label %resize, label %write\n";
+        out << "resize:\n";
+        out << "  %empty = icmp eq " << usize << " %cap, 0\n";
+        out << "  %double = mul " << usize << " %cap, 2\n";
+        out << "  %newcap = select i1 %empty, " << usize << " 4, " << usize << " %double\n";
+        out << "  %one = getelementptr %nus.reactor.entry, ptr null, i32 1\n";
+        out << "  %stride = ptrtoint ptr %one to " << usize << "\n";
+        out << "  %bytes = mul " << usize << " %newcap, %stride\n";
+        out << "  %resized = call ptr @realloc(ptr %data, " << usize << " %bytes)\n";
+        out << "  %alloc.ok = icmp ne ptr %resized, null\n";
+        out << "  br i1 %alloc.ok, label %resize.ok, label %alloc.fail\n";
+        out << "alloc.fail:\n  ret i32 -1\n";
+        out << "resize.ok:\n";
+        out << "  store ptr %resized, ptr %data.ptr\n";
+        out << "  store " << usize << " %newcap, ptr %cap.ptr\n";
+        out << "  br label %write\n";
+        out << "write:\n";
+        out << "  %entries = phi ptr [ %data, %entry ], [ %resized, %resize.ok ]\n";
+        out << "  %slot = getelementptr inbounds %nus.reactor.entry, ptr %entries, " << usize << " %len\n";
+        out << "  %handle.ptr = getelementptr inbounds %nus.reactor.entry, ptr %slot, i32 0, i32 0\n";
+        out << "  %events.ptr = getelementptr inbounds %nus.reactor.entry, ptr %slot, i32 0, i32 1\n";
+        out << "  %revents.ptr = getelementptr inbounds %nus.reactor.entry, ptr %slot, i32 0, i32 2\n";
+        out << "  %token.ptr = getelementptr inbounds %nus.reactor.entry, ptr %slot, i32 0, i32 3\n";
+        out << "  store i64 %handle, ptr %handle.ptr\n";
+        out << "  store i16 %events, ptr %events.ptr\n";
+        out << "  store i16 0, ptr %revents.ptr\n";
+        out << "  store " << usize << " %token, ptr %token.ptr\n";
+        out << "  store " << usize << " %need, ptr %len.ptr\n";
+        out << "  ret i32 0\n";
+        out << "}\n\n";
+
+        out << "define internal i32 @nus_reactor_wait(ptr %reactor, i32 %timeout) {\n";
+        out << "entry:\n";
+        out << "  %data.ptr = getelementptr inbounds %nus.reactor, ptr %reactor, i32 0, i32 0\n";
+        out << "  %len.ptr = getelementptr inbounds %nus.reactor, ptr %reactor, i32 0, i32 1\n";
+        out << "  %data = load ptr, ptr %data.ptr\n";
+        out << "  %len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %empty = icmp eq " << usize << " %len, 0\n";
+        out << "  br i1 %empty, label %empty.set, label %alloc\n";
+        out << "empty.set:\n  ret i32 0\n";
+        out << "alloc:\n";
+        out << "  %os.one = getelementptr %nus.os.pollfd, ptr null, i32 1\n";
+        out << "  %os.stride = ptrtoint ptr %os.one to " << usize << "\n";
+        out << "  %bytes = mul " << usize << " %len, %os.stride\n";
+        out << "  %fds = call ptr @malloc(" << usize << " %bytes)\n";
+        out << "  %alloc.ok = icmp ne ptr %fds, null\n";
+        out << "  br i1 %alloc.ok, label %fill.init, label %alloc.fail\n";
+        out << "alloc.fail:\n  ret i32 -2\n";
+        out << "fill.init:\n";
+        out << "  %fill.i = alloca " << usize << "\n";
+        out << "  store " << usize << " 0, ptr %fill.i\n";
+        out << "  br label %fill.head\n";
+        out << "fill.head:\n";
+        out << "  %fi = load " << usize << ", ptr %fill.i\n";
+        out << "  %fill.more = icmp ult " << usize << " %fi, %len\n";
+        out << "  br i1 %fill.more, label %fill.body, label %poll.call\n";
+        out << "fill.body:\n";
+        out << "  %src = getelementptr inbounds %nus.reactor.entry, ptr %data, " << usize << " %fi\n";
+        out << "  %src.handle.ptr = getelementptr inbounds %nus.reactor.entry, ptr %src, i32 0, i32 0\n";
+        out << "  %src.events.ptr = getelementptr inbounds %nus.reactor.entry, ptr %src, i32 0, i32 1\n";
+        out << "  %h64 = load i64, ptr %src.handle.ptr\n";
+        out << "  %ev = load i16, ptr %src.events.ptr\n";
+        out << "  %dst = getelementptr inbounds %nus.os.pollfd, ptr %fds, " << usize << " %fi\n";
+        out << "  %dst.handle.ptr = getelementptr inbounds %nus.os.pollfd, ptr %dst, i32 0, i32 0\n";
+        out << "  %dst.events.ptr = getelementptr inbounds %nus.os.pollfd, ptr %dst, i32 0, i32 1\n";
+        out << "  %dst.revents.ptr = getelementptr inbounds %nus.os.pollfd, ptr %dst, i32 0, i32 2\n";
+        if (windowsTarget()) out << "  store i64 %h64, ptr %dst.handle.ptr\n";
+        else out << "  %h32 = trunc i64 %h64 to i32\n  store i32 %h32, ptr %dst.handle.ptr\n";
+        out << "  store i16 %ev, ptr %dst.events.ptr\n";
+        out << "  store i16 0, ptr %dst.revents.ptr\n";
+        out << "  %fi.next = add " << usize << " %fi, 1\n";
+        out << "  store " << usize << " %fi.next, ptr %fill.i\n";
+        out << "  br label %fill.head\n";
+        out << "poll.call:\n";
+        if (windowsTarget()) {
+            if (target_.pointer_bits == 64U) out << "  %len32 = trunc i64 %len to i32\n";
+            else out << "  %len32 = add i32 %len, 0\n";
+            out << "  %rc = call i32 @WSAPoll(ptr %fds, i32 %len32, i32 %timeout)\n";
+        } else if (darwinTarget()) {
+            if (target_.pointer_bits == 64U) out << "  %len32 = trunc i64 %len to i32\n";
+            else out << "  %len32 = add i32 %len, 0\n";
+            out << "  %rc = call i32 @poll(ptr %fds, i32 %len32, i32 %timeout)\n";
+        } else {
+            out << "  %rc = call i32 @poll(ptr %fds, " << usize << " %len, i32 %timeout)\n";
+        }
+        out << "  %poll.ok = icmp sge i32 %rc, 0\n";
+        out << "  br i1 %poll.ok, label %copy.init, label %poll.fail\n";
+        out << "poll.fail:\n";
+        out << "  call void @free(ptr %fds)\n";
+        out << "  ret i32 -1\n";
+        out << "copy.init:\n";
+        out << "  %copy.i = alloca " << usize << "\n";
+        out << "  store " << usize << " 0, ptr %copy.i\n";
+        out << "  br label %copy.head\n";
+        out << "copy.head:\n";
+        out << "  %ci = load " << usize << ", ptr %copy.i\n";
+        out << "  %copy.more = icmp ult " << usize << " %ci, %len\n";
+        out << "  br i1 %copy.more, label %copy.body, label %done\n";
+        out << "copy.body:\n";
+        out << "  %os = getelementptr inbounds %nus.os.pollfd, ptr %fds, " << usize << " %ci\n";
+        out << "  %os.rev.ptr = getelementptr inbounds %nus.os.pollfd, ptr %os, i32 0, i32 2\n";
+        out << "  %rev = load i16, ptr %os.rev.ptr\n";
+        out << "  %custom.entry = getelementptr inbounds %nus.reactor.entry, ptr %data, " << usize << " %ci\n";
+        out << "  %custom.rev.ptr = getelementptr inbounds %nus.reactor.entry, ptr %custom.entry, i32 0, i32 2\n";
+        out << "  store i16 %rev, ptr %custom.rev.ptr\n";
+        out << "  %ci.next = add " << usize << " %ci, 1\n";
+        out << "  store " << usize << " %ci.next, ptr %copy.i\n";
+        out << "  br label %copy.head\n";
+        out << "done:\n";
+        out << "  call void @free(ptr %fds)\n";
+        out << "  ret i32 %rc\n";
         out << "}\n\n";
     }
 
@@ -742,6 +890,32 @@ void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& poi
             }
             out_ << "  br label %" << end_label << "\n";
             out_ << end_label << ":\n";
+            break;
+        }
+        case TypeKind::Reactor: {
+            const std::string loaded = next("dropreactor");
+            const std::string entries = next("reactorentries");
+            out_ << "  " << loaded << " = load %nus.reactor, ptr " << pointer << "\n";
+            out_ << "  " << entries << " = extractvalue %nus.reactor " << loaded << ", 0\n";
+            out_ << "  call void @free(ptr " << entries << ")\n";
+            break;
+        }
+        case TypeKind::Future: {
+            if (!type.element) throw std::runtime_error("LLVM codegen: malformed Future drop type");
+            if (type.element->isUnit() || type.element->isCopy() || type.element->isReference()) break;
+            const std::string future = next("dropfuture");
+            const std::string ready = next("futureready");
+            const std::string do_label = nextLabel("drop.future.do.");
+            const std::string done_label = nextLabel("drop.future.done.");
+            out_ << "  " << future << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
+            out_ << "  " << ready << " = extractvalue " << module_.llvmType(type) << ' ' << future << ", 0\n";
+            out_ << "  br i1 " << ready << ", label %" << do_label << ", label %" << done_label << "\n";
+            out_ << do_label << ":\n";
+            const std::string payload_ptr = next("futurepayload");
+            out_ << "  " << payload_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer << ", i32 0, i32 1\n";
+            emitDestroy(*type.element, payload_ptr);
+            out_ << "  br label %" << done_label << "\n";
+            out_ << done_label << ":\n";
             break;
         }
         case TypeKind::Vec: {
@@ -2071,6 +2245,246 @@ void FunctionEmitter::builtinUdpReceive(const mir::Instruction& inst, const std:
 }
 
 
+void FunctionEmitter::builtinSetNonblocking(const mir::Instruction& inst,
+                                             const std::vector<mir::Operand>& arguments,
+                                             sema::TypeKind socket_kind) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: set_nonblocking expects socket and bool");
+    const auto& result_type = local(*inst.destination).type;
+    const Value socket_ref = value(arguments[0]);
+    const Value enabled = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::Bool));
+    sema::Type socket_type = sema::Type::simple(socket_kind);
+    const std::string ir_type = module_.llvmType(socket_type);
+    const std::string aggregate = next("socket");
+    out_ << "  " << aggregate << " = load " << ir_type << ", ptr " << socket_ref.repr << "\n";
+    const std::string handle = socketHandleForCall({ir_type, aggregate});
+    const std::string rc = next("nonblock");
+    if (module_.windowsTarget()) {
+        const std::string mode = next("nonblockmode");
+        const std::string mode_ptr = next("nonblockptr");
+        out_ << "  " << mode << " = zext i1 " << enabled.repr << " to i32\n";
+        out_ << "  " << mode_ptr << " = alloca i32\n";
+        out_ << "  store i32 " << mode << ", ptr " << mode_ptr << "\n";
+        out_ << "  " << rc << " = call i32 @ioctlsocket(i64 " << handle << ", i32 2147772030, ptr " << mode_ptr << ")\n";
+    } else {
+        const int nonblock_flag = module_.darwinTarget() ? 4 : 2048;
+        const std::string flags = next("flags");
+        const std::string set_flags = next("flags");
+        const std::string enabled_flags = next("flags");
+        const std::string disabled_mask = next("mask");
+        const std::string disabled_flags = next("flags");
+        const std::string final_flags = next("flags");
+        out_ << "  " << flags << " = call i32 (i32, i32, ...) @fcntl(i32 " << handle << ", i32 3)\n";
+        out_ << "  " << set_flags << " = or i32 " << flags << ", " << nonblock_flag << "\n";
+        out_ << "  " << disabled_mask << " = xor i32 " << nonblock_flag << ", -1\n";
+        out_ << "  " << disabled_flags << " = and i32 " << flags << ", " << disabled_mask << "\n";
+        out_ << "  " << enabled_flags << " = select i1 " << enabled.repr << ", i32 " << set_flags << ", i32 " << disabled_flags << "\n";
+        out_ << "  " << final_flags << " = add i32 " << enabled_flags << ", 0\n";
+        out_ << "  " << rc << " = call i32 (i32, i32, ...) @fcntl(i32 " << handle << ", i32 4, i32 " << final_flags << ")\n";
+    }
+    const std::string ok = next("nonblockok");
+    const std::string ok_label = nextLabel("nonblock.ok.");
+    const std::string err_label = nextLabel("nonblock.err.");
+    const std::string done = nextLabel("nonblock.done.");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
+    out_ << "  " << ok << " = icmp eq i32 " << rc << ", 0\n";
+    out_ << "  br i1 " << ok << ", label %" << ok_label << ", label %" << err_label << "\n";
+    out_ << err_label << ":\n";
+    Value result = emitNetworkResult(result_type, true, emitNetworkError(10));
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << ok_label << ":\n";
+    result = emitNetworkResult(result_type, false, {"i32", "0"});
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinReactorNew(const mir::Instruction& inst) {
+    if (!inst.destination) throw std::runtime_error("LLVM codegen: reactor_new requires a destination");
+    const auto& result_type = local(*inst.destination).type;
+    const std::string result_slot = next("reactorresult");
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
+    const std::string success_label = nextLabel("reactor.new.ok.");
+    const std::string done = nextLabel("reactor.new.done.");
+    if (module_.windowsTarget()) {
+        const std::string init = next("wsainit");
+        const std::string ok = next("wsaok");
+        const std::string fail = nextLabel("reactor.new.fail.");
+        out_ << "  " << init << " = call i32 @nus_net_init()\n";
+        out_ << "  " << ok << " = icmp eq i32 " << init << ", 0\n";
+        out_ << "  br i1 " << ok << ", label %" << success_label << ", label %" << fail << "\n";
+        out_ << fail << ":\n";
+        Value result = emitNetworkResult(result_type, true, emitNetworkError(1, 0));
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    } else {
+        out_ << "  br label %" << success_label << "\n";
+    }
+    out_ << success_label << ":\n";
+    const std::string r1 = next("reactor");
+    const std::string r2 = next("reactor");
+    const std::string r3 = next("reactor");
+    out_ << "  " << r1 << " = insertvalue %nus.reactor zeroinitializer, ptr null, 0\n";
+    out_ << "  " << r2 << " = insertvalue %nus.reactor " << r1 << ", " << module_.usizeType() << " 0, 1\n";
+    out_ << "  " << r3 << " = insertvalue %nus.reactor " << r2 << ", " << module_.usizeType() << " 0, 2\n";
+    Value result = emitNetworkResult(result_type, false, {"%nus.reactor", r3});
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinReactorLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: reactor_len expects &Reactor");
+    const Value reactor_ref = value(arguments[0]);
+    const std::string reactor = next("reactor");
+    const std::string length = next("reactorlen");
+    out_ << "  " << reactor << " = load %nus.reactor, ptr " << reactor_ref.repr << "\n";
+    out_ << "  " << length << " = extractvalue %nus.reactor " << reactor << ", 1\n";
+    store(*inst.destination, {module_.usizeType(), length});
+}
+
+void FunctionEmitter::builtinReactorRegister(const mir::Instruction& inst,
+                                              const std::vector<mir::Operand>& arguments,
+                                              sema::TypeKind socket_kind,
+                                              bool listener_only) {
+    const std::size_t expected = listener_only ? 3U : 5U;
+    if (!inst.destination || arguments.size() != expected) throw std::runtime_error("LLVM codegen: malformed reactor registration");
+    const auto& result_type = local(*inst.destination).type;
+    const Value reactor_ref = value(arguments[0]);
+    const Value socket_ref = value(arguments[1]);
+    const Value token = coerce(value(arguments[2]), arguments[2].type, sema::Type::simple(sema::TypeKind::USize));
+    sema::Type socket_type = sema::Type::simple(socket_kind);
+    const std::string socket_ir = module_.llvmType(socket_type);
+    const std::string socket = next("reactorsocket");
+    const std::string handle64 = next("reactorhandle");
+    out_ << "  " << socket << " = load " << socket_ir << ", ptr " << socket_ref.repr << "\n";
+    out_ << "  " << handle64 << " = extractvalue " << socket_ir << ' ' << socket << ", 0\n";
+    const int read_mask = module_.windowsTarget() ? 0x0100 : 0x0001;
+    const int write_mask = module_.windowsTarget() ? 0x0010 : 0x0004;
+    std::string events;
+    if (listener_only) {
+        events = std::to_string(read_mask);
+    } else {
+        const Value readable = coerce(value(arguments[3]), arguments[3].type, sema::Type::simple(sema::TypeKind::Bool));
+        const Value writable = coerce(value(arguments[4]), arguments[4].type, sema::Type::simple(sema::TypeKind::Bool));
+        const std::string read = next("events");
+        const std::string write = next("events");
+        events = next("events");
+        out_ << "  " << read << " = select i1 " << readable.repr << ", i16 " << read_mask << ", i16 0\n";
+        out_ << "  " << write << " = select i1 " << writable.repr << ", i16 " << write_mask << ", i16 0\n";
+        out_ << "  " << events << " = or i16 " << read << ", " << write << "\n";
+    }
+    const std::string rc = next("reactorregister");
+    out_ << "  " << rc << " = call i32 @nus_reactor_register(ptr " << reactor_ref.repr << ", i64 " << handle64
+         << ", " << module_.usizeType() << ' ' << token.repr << ", i16 " << events << ")\n";
+    const std::string ok = next("reactorok");
+    const std::string ok_label = nextLabel("reactor.register.ok.");
+    const std::string err_label = nextLabel("reactor.register.err.");
+    const std::string done = nextLabel("reactor.register.done.");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
+    out_ << "  " << ok << " = icmp eq i32 " << rc << ", 0\n";
+    out_ << "  br i1 " << ok << ", label %" << ok_label << ", label %" << err_label << "\n";
+    out_ << err_label << ":\n";
+    Value result = emitNetworkResult(result_type, true, emitNetworkError(11, 0));
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << ok_label << ":\n";
+    result = emitNetworkResult(result_type, false, {"i32", "0"});
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinReactorWait(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: reactor_wait expects &mut Reactor and timeout");
+    const auto& result_type = local(*inst.destination).type;
+    const Value reactor_ref = value(arguments[0]);
+    const Value timeout = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::I32));
+    const std::string rc = next("reactorwait");
+    out_ << "  " << rc << " = call i32 @nus_reactor_wait(ptr " << reactor_ref.repr << ", i32 " << timeout.repr << ")\n";
+    const std::string ok = next("reactorok");
+    const std::string ok_label = nextLabel("reactor.wait.ok.");
+    const std::string err_label = nextLabel("reactor.wait.err.");
+    const std::string done = nextLabel("reactor.wait.done.");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
+    out_ << "  " << ok << " = icmp sge i32 " << rc << ", 0\n";
+    out_ << "  br i1 " << ok << ", label %" << ok_label << ", label %" << err_label << "\n";
+    out_ << err_label << ":\n";
+    Value result = emitNetworkResult(result_type, true, emitNetworkError(11, 0));
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << ok_label << ":\n";
+    std::string count = rc;
+    if (module_.usizeType() == "i64") {
+        count = next("readycount");
+        out_ << "  " << count << " = zext i32 " << rc << " to i64\n";
+    }
+    result = emitNetworkResult(result_type, false, {module_.usizeType(), count});
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinReactorEventToken(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: reactor_event_token expects reactor and index");
+    const Value reactor_ref = value(arguments[0]);
+    const Value index = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::USize));
+    const std::string reactor = next("reactor");
+    const std::string entries = next("entries");
+    const std::string length = next("len");
+    const std::string in_bounds = next("bounds");
+    const std::string entry = next("entry");
+    const std::string token_ptr = next("tokenptr");
+    const std::string token = next("token");
+    out_ << "  " << reactor << " = load %nus.reactor, ptr " << reactor_ref.repr << "\n";
+    out_ << "  " << entries << " = extractvalue %nus.reactor " << reactor << ", 0\n";
+    out_ << "  " << length << " = extractvalue %nus.reactor " << reactor << ", 1\n";
+    out_ << "  " << in_bounds << " = icmp ult " << module_.usizeType() << ' ' << index.repr << ", " << length << "\n";
+    out_ << "  call void @nus_assert(i1 " << in_bounds << ")\n";
+    out_ << "  " << entry << " = getelementptr inbounds %nus.reactor.entry, ptr " << entries << ", " << module_.usizeType() << ' ' << index.repr << "\n";
+    out_ << "  " << token_ptr << " = getelementptr inbounds %nus.reactor.entry, ptr " << entry << ", i32 0, i32 3\n";
+    out_ << "  " << token << " = load " << module_.usizeType() << ", ptr " << token_ptr << "\n";
+    store(*inst.destination, {module_.usizeType(), token});
+}
+
+void FunctionEmitter::builtinReactorEventReady(const mir::Instruction& inst,
+                                                const std::vector<mir::Operand>& arguments,
+                                                bool writable) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: reactor event query expects reactor and index");
+    const Value reactor_ref = value(arguments[0]);
+    const Value index = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::USize));
+    const int mask = writable ? (module_.windowsTarget() ? 0x0010 : 0x0004)
+                              : (module_.windowsTarget() ? 0x0100 : 0x0001);
+    const std::string reactor = next("reactor");
+    const std::string entries = next("entries");
+    const std::string length = next("len");
+    const std::string in_bounds = next("bounds");
+    const std::string entry = next("entry");
+    const std::string revents_ptr = next("reventsptr");
+    const std::string revents = next("revents");
+    const std::string masked = next("readybits");
+    const std::string ready = next("ready");
+    out_ << "  " << reactor << " = load %nus.reactor, ptr " << reactor_ref.repr << "\n";
+    out_ << "  " << entries << " = extractvalue %nus.reactor " << reactor << ", 0\n";
+    out_ << "  " << length << " = extractvalue %nus.reactor " << reactor << ", 1\n";
+    out_ << "  " << in_bounds << " = icmp ult " << module_.usizeType() << ' ' << index.repr << ", " << length << "\n";
+    out_ << "  call void @nus_assert(i1 " << in_bounds << ")\n";
+    out_ << "  " << entry << " = getelementptr inbounds %nus.reactor.entry, ptr " << entries << ", " << module_.usizeType() << ' ' << index.repr << "\n";
+    out_ << "  " << revents_ptr << " = getelementptr inbounds %nus.reactor.entry, ptr " << entry << ", i32 0, i32 2\n";
+    out_ << "  " << revents << " = load i16, ptr " << revents_ptr << "\n";
+    out_ << "  " << masked << " = and i16 " << revents << ", " << mask << "\n";
+    out_ << "  " << ready << " = icmp ne i16 " << masked << ", 0\n";
+    store(*inst.destination, {"i1", ready});
+}
+
+
 void FunctionEmitter::instruction(const mir::Instruction& inst) {
     using mir::InstructionKind;
     switch (inst.kind) {
@@ -2190,6 +2604,18 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (callee.text == "udp_bind") { builtinUdpBind(inst, arguments); return; }
             if (callee.text == "udp_send_to") { builtinUdpSendTo(inst, arguments); return; }
             if (callee.text == "udp_receive") { builtinUdpReceive(inst, arguments); return; }
+            if (callee.text == "tcp_set_nonblocking") { builtinSetNonblocking(inst, arguments, sema::TypeKind::TcpStream); return; }
+            if (callee.text == "tcp_listener_set_nonblocking") { builtinSetNonblocking(inst, arguments, sema::TypeKind::TcpListener); return; }
+            if (callee.text == "udp_set_nonblocking") { builtinSetNonblocking(inst, arguments, sema::TypeKind::UdpSocket); return; }
+            if (callee.text == "reactor_new") { builtinReactorNew(inst); return; }
+            if (callee.text == "reactor_len") { builtinReactorLen(inst, arguments); return; }
+            if (callee.text == "reactor_register_tcp") { builtinReactorRegister(inst, arguments, sema::TypeKind::TcpStream, false); return; }
+            if (callee.text == "reactor_register_listener") { builtinReactorRegister(inst, arguments, sema::TypeKind::TcpListener, true); return; }
+            if (callee.text == "reactor_register_udp") { builtinReactorRegister(inst, arguments, sema::TypeKind::UdpSocket, false); return; }
+            if (callee.text == "reactor_wait") { builtinReactorWait(inst, arguments); return; }
+            if (callee.text == "reactor_event_token") { builtinReactorEventToken(inst, arguments); return; }
+            if (callee.text == "reactor_event_readable") { builtinReactorEventReady(inst, arguments, false); return; }
+            if (callee.text == "reactor_event_writable") { builtinReactorEventReady(inst, arguments, true); return; }
             if (callee.text == "vec_new_i32" || callee.text.rfind("__builtin_vec_new$", 0) == 0) { builtinVecNew(inst); return; }
             if (callee.text == "vec_push_i32" || callee.text.rfind("__builtin_vec_push$", 0) == 0) { builtinVecPush(arguments); return; }
             if (callee.text == "vec_len_i32" || callee.text.rfind("__builtin_vec_len$", 0) == 0) { builtinVecLen(inst, arguments); return; }
@@ -2197,6 +2623,25 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (callee.text.rfind("__builtin_vec_into_iter$", 0) == 0) { builtinVecIntoIter(inst, arguments); return; }
             if (callee.text.rfind("__builtin_vec_iter_mut$", 0) == 0) { builtinVecBorrowIter(inst, arguments, true); return; }
             if (callee.text.rfind("__builtin_vec_iter$", 0) == 0) { builtinVecBorrowIter(inst, arguments, false); return; }
+            if (callee.text.rfind("__builtin_block_on$", 0) == 0) {
+                if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: block_on expects one Future<T>");
+                const auto& future_operand = arguments.front();
+                if (future_operand.type.kind != sema::TypeKind::Future || !future_operand.type.element) throw std::runtime_error("LLVM codegen: block_on operand must be Future<T>");
+                const Value future = value(future_operand);
+                const std::string ready = next("blockready");
+                out_ << "  " << ready << " = extractvalue " << future.type << ' ' << future.repr << ", 0\n";
+                out_ << "  call void @nus_assert(i1 " << ready << ")\n";
+                if (!future_operand.type.element->isUnit()) {
+                    const std::string payload = next("blockvalue");
+                    const std::string payload_type = module_.llvmType(*future_operand.type.element);
+                    out_ << "  " << payload << " = extractvalue " << future.type << ' ' << future.repr << ", 1\n";
+                    markMoved(future_operand);
+                    store(*inst.destination, {payload_type, payload});
+                } else {
+                    markMoved(future_operand);
+                }
+                return;
+            }
             if (callee.text.rfind("__builtin_some$", 0) == 0 || callee.text.rfind("__builtin_none$", 0) == 0 ||
                 callee.text.rfind("__builtin_ok$", 0) == 0 || callee.text.rfind("__builtin_err$", 0) == 0) {
                 if (!inst.destination) throw std::runtime_error("LLVM codegen: tagged constructor requires destination");
@@ -2605,6 +3050,43 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 break;
             }
             throw std::runtime_error("LLVM codegen: unsupported iterator type `" + iterator.type.name() + "`");
+        }
+        case InstructionKind::MakeReadyFuture: {
+            if (!inst.destination || inst.operands.size() != 1) throw std::runtime_error("LLVM codegen: future.ready expects one operand");
+            const auto& future_type = local(*inst.destination).type;
+            if (future_type.kind != sema::TypeKind::Future || !future_type.element) throw std::runtime_error("LLVM codegen: future.ready destination must be Future<T>");
+            const std::string ir = module_.llvmType(future_type);
+            const std::string tagged = next("future");
+            out_ << "  " << tagged << " = insertvalue " << ir << " zeroinitializer, i1 true, 0\n";
+            std::string result = tagged;
+            if (!future_type.element->isUnit()) {
+                const Value payload = coerce(value(inst.operands.front()), inst.operands.front().type, *future_type.element);
+                const std::string inserted = next("future");
+                out_ << "  " << inserted << " = insertvalue " << ir << ' ' << tagged << ", " << payload.type << ' ' << payload.repr << ", 1\n";
+                result = inserted;
+            }
+            markMoved(inst.operands.front());
+            store(*inst.destination, {ir, result});
+            break;
+        }
+        case InstructionKind::Await: {
+            if (!inst.destination || inst.operands.size() != 1) throw std::runtime_error("LLVM codegen: await expects one future operand");
+            const auto& future_operand = inst.operands.front();
+            if (future_operand.type.kind != sema::TypeKind::Future || !future_operand.type.element) throw std::runtime_error("LLVM codegen: await operand must be Future<T>");
+            const Value future = value(future_operand);
+            const std::string ready = next("awaitready");
+            out_ << "  " << ready << " = extractvalue " << future.type << ' ' << future.repr << ", 0\n";
+            out_ << "  call void @nus_assert(i1 " << ready << ")\n";
+            if (!future_operand.type.element->isUnit()) {
+                const std::string payload = next("awaitvalue");
+                const std::string payload_type = module_.llvmType(*future_operand.type.element);
+                out_ << "  " << payload << " = extractvalue " << future.type << ' ' << future.repr << ", 1\n";
+                markMoved(future_operand);
+                store(*inst.destination, {payload_type, payload});
+            } else {
+                markMoved(future_operand);
+            }
+            break;
         }
         case InstructionKind::Drop:
             emitDrop(inst, false);

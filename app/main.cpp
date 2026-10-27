@@ -121,6 +121,8 @@ int main(int argc, char** argv) {
             const auto mut_iter_layout = layouts.layoutOf(nus::sema::Type::borrowedVectorIterator(nus::sema::Type::simple(nus::sema::TypeKind::I32), true));
             const auto network_error_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::NetworkError));
             const auto tcp_listener_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::TcpListener));
+            const auto reactor_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::Reactor));
+            const auto future_i32_layout = layouts.layoutOf(nus::sema::Type::future(nus::sema::Type::simple(nus::sema::TypeKind::I32)));
             std::cout << "target " << target.description() << '\n';
             std::cout << "string size=" << string_layout.size << " align=" << string_layout.alignment << '\n';
             std::cout << "Vec<i32> size=" << vec_layout.size << " align=" << vec_layout.alignment << '\n';
@@ -128,6 +130,8 @@ int main(int argc, char** argv) {
             std::cout << "VecMutIter<i32> size=" << mut_iter_layout.size << " align=" << mut_iter_layout.alignment << '\n';
             std::cout << "NetworkError size=" << network_error_layout.size << " align=" << network_error_layout.alignment << '\n';
             std::cout << "TcpListener size=" << tcp_listener_layout.size << " align=" << tcp_listener_layout.alignment << '\n';
+            std::cout << "Reactor size=" << reactor_layout.size << " align=" << reactor_layout.alignment << '\n';
+            std::cout << "Future<i32> size=" << future_i32_layout.size << " align=" << future_i32_layout.alignment << '\n';
             for (const auto& structure : mir.structs) {
                 const auto layout = layouts.layoutOfStruct(structure.name);
                 std::cout << "struct " << layout.name << " size=" << layout.layout.size

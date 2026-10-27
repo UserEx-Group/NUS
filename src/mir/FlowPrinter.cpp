@@ -36,7 +36,7 @@ std::string FlowPrinter::print(const Program& program, const FlowResult& result)
         out << "    loans:\n";
         for (const auto& loan : info.loans) {
             out << "      L" << loan.id << ": %" << loan.reference << " -> %" << loan.root
-                << (loan.is_mutable ? " mutable" : " shared") << '\n';
+                << (loan.is_pin ? " resource-pin" : (loan.is_mutable ? " mutable" : " shared")) << '\n';
         }
         for (const auto& block : function.blocks) {
             const auto live = info.liveness.blocks.find(block.id);

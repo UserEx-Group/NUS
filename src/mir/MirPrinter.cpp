@@ -41,6 +41,8 @@ std::string instructionName(InstructionKind kind) {
         case InstructionKind::StoreDeref: return "store.deref";
         case InstructionKind::Drop: return "drop";
         case InstructionKind::DropIf: return "drop.if.init";
+        case InstructionKind::MakeReadyFuture: return "future.ready";
+        case InstructionKind::Await: return "await";
     }
     return "<?>";
 }

@@ -112,6 +112,8 @@ struct Stmt {
 
 struct Function {
     std::string name;
+    bool is_async{false};
+    sema::Type async_result_type{sema::Type::simple(sema::TypeKind::Unit)};
     std::string owner_type;
     std::optional<Local> receiver;
     std::vector<Local> parameters;
