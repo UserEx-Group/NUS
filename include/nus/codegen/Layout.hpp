@@ -37,6 +37,7 @@ public:
 
 private:
     [[nodiscard]] const mir::Struct& findStruct(const std::string& name) const;
+    [[nodiscard]] const mir::Enum& findEnum(const std::string& name) const;
     [[nodiscard]] static std::size_t alignTo(std::size_t value, std::size_t alignment);
 
     const mir::Program& program_;
