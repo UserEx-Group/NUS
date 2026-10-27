@@ -28,6 +28,7 @@ enum class TypeKind {
     String,
     Bytes,
     Vec,
+    VecIter,
     Option,
     Result,
     TypeParameter,
@@ -59,6 +60,7 @@ struct Type {
     [[nodiscard]] static Type slice(Type element);
     [[nodiscard]] static Type range(Type element);
     [[nodiscard]] static Type vector(Type element);
+    [[nodiscard]] static Type vectorIterator(Type element);
     [[nodiscard]] static Type option(Type element);
     [[nodiscard]] static Type result(Type ok_type, Type error_type);
     [[nodiscard]] static Type typeParameter(std::string name, std::vector<std::string> bounds = {});

@@ -24,6 +24,9 @@ public:
         std::vector<std::pair<std::string, Type>> substitutions;
         Type signature{Type::simple(TypeKind::Error)};
         bool builtin{false};
+        bool method{false};
+        Type receiver_type{Type::simple(TypeKind::Unknown)};
+        ast::ReceiverKind receiver{ast::ReceiverKind::None};
     };
     explicit SemanticAnalyzer(bool lexical_ownership_checks = false);
 
@@ -34,6 +37,7 @@ public:
     [[nodiscard]] const Type* typeOf(const ast::Expr& expression) const noexcept;
     [[nodiscard]] const std::vector<GenericInstantiation>& genericInstantiations() const noexcept;
     [[nodiscard]] const std::string* resolvedCallTarget(const ast::CallExpr& expression) const noexcept;
+    [[nodiscard]] ast::ReceiverKind resolvedCallReceiver(const ast::CallExpr& expression) const noexcept;
 
 private:
     struct LValueInfo {
@@ -45,6 +49,18 @@ private:
         const ast::FunctionDecl* declaration{nullptr};
         ast::ReceiverKind receiver{ast::ReceiverKind::None};
         Type signature{Type::simple(TypeKind::Error)};
+    };
+
+    struct TraitInfo {
+        const ast::TraitDecl* declaration{nullptr};
+        std::unordered_set<std::string> associated_types;
+        std::unordered_map<std::string, const ast::FunctionDecl*> methods;
+    };
+
+    struct GenericTraitImplInfo {
+        std::string trait_name;
+        Type target_pattern{Type::simple(TypeKind::Error)};
+        std::vector<ast::GenericParameter> generic_parameters;
     };
 
     struct StructInfo {
@@ -72,6 +88,14 @@ private:
         bool builtin{false};
     };
 
+
+    struct GenericMethodInfo {
+        const ast::FunctionDecl* declaration{nullptr};
+        Type target_pattern{Type::simple(TypeKind::Error)};
+        std::vector<ast::GenericParameter> impl_parameters;
+        ast::ReceiverKind receiver{ast::ReceiverKind::None};
+        Type signature{Type::simple(TypeKind::Error)};
+    };
     struct BorrowRecord {
         std::size_t symbol_id{0};
         bool is_mutable{false};
@@ -88,9 +112,12 @@ private:
     void collectFunctions(const ast::SourceFile& file);
     void collectMethods(const ast::SourceFile& file);
     void analyzeFunction(const ast::FunctionDecl& function);
-    void analyzeMethod(const std::string& target_name, const ast::FunctionDecl& method);
+    void analyzeMethod(const Type& target_type, const ast::FunctionDecl& method,
+                       const std::vector<ast::GenericParameter>& impl_parameters = {});
 
     [[nodiscard]] Type resolveType(const ast::TypeRef& type_ref);
+    [[nodiscard]] Type resolveTraitType(const ast::TypeRef& type_ref, const Type& self_type,
+                                        const std::unordered_map<std::string, Type>& associated_types);
     [[nodiscard]] Type instantiateType(const Type& type, const std::unordered_map<std::string, Type>& substitutions) const;
     [[nodiscard]] bool inferGeneric(const Type& pattern, const Type& actual, std::unordered_map<std::string, Type>& substitutions) const;
     [[nodiscard]] bool satisfiesTrait(const Type& type, std::string_view trait) const;
@@ -105,6 +132,10 @@ private:
     [[nodiscard]] Type checkAssignment(const ast::AssignmentExpr& expression);
     [[nodiscard]] Type checkCall(const ast::CallExpr& expression);
     [[nodiscard]] Type checkMethodCall(const ast::CallExpr& expression, const ast::MemberExpr& member);
+    [[nodiscard]] Type checkVecMethodCall(const ast::CallExpr& expression, const ast::MemberExpr& member, const Type& object_type);
+    [[nodiscard]] Type checkGenericMethodCall(const ast::CallExpr& expression, const ast::MemberExpr& member,
+                                              const Type& object_type, const GenericMethodInfo& method,
+                                              std::unordered_map<std::string, Type> substitutions);
     [[nodiscard]] Type checkMember(const ast::MemberExpr& expression);
     [[nodiscard]] Type checkIndex(const ast::IndexExpr& expression);
     [[nodiscard]] Type checkArray(const ast::ArrayExpr& expression);
@@ -161,9 +192,13 @@ private:
     std::unordered_map<std::string, GenericFunctionInfo> generic_functions_;
     std::vector<GenericInstantiation> generic_instantiations_;
     std::unordered_map<const ast::CallExpr*, std::string> resolved_call_targets_;
+    std::unordered_map<const ast::CallExpr*, ast::ReceiverKind> resolved_call_receivers_;
     std::unordered_map<std::string, Type> generic_type_environment_;
     std::unordered_set<std::string> traits_;
+    std::unordered_map<std::string, TraitInfo> trait_infos_;
     std::unordered_map<std::string, std::unordered_set<std::string>> trait_impls_;
+    std::vector<GenericTraitImplInfo> generic_trait_impls_;
+    std::vector<GenericMethodInfo> generic_methods_;
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_map<std::string, EnumInfo> enums_;
     Type current_return_type_{Type::simple(TypeKind::Unit)};

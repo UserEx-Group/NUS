@@ -55,6 +55,13 @@ Type Type::vector(Type element_type) {
     return type;
 }
 
+Type Type::vectorIterator(Type element_type) {
+    Type type;
+    type.kind = TypeKind::VecIter;
+    type.element = std::make_shared<Type>(std::move(element_type));
+    return type;
+}
+
 Type Type::option(Type element_type) {
     Type type;
     type.kind = TypeKind::Option;
@@ -195,6 +202,7 @@ bool Type::isCopy() const noexcept {
         case TypeKind::String:
         case TypeKind::Bytes:
         case TypeKind::Vec:
+        case TypeKind::VecIter:
         case TypeKind::Struct:
         case TypeKind::Enum:
             return false;
@@ -204,7 +212,7 @@ bool Type::isCopy() const noexcept {
 
 bool Type::containsReference() const noexcept {
     if (kind == TypeKind::Reference) return true;
-    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec || kind == TypeKind::Option) && element) {
+    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec || kind == TypeKind::VecIter || kind == TypeKind::Option) && element) {
         return element->containsReference();
     }
     if (kind == TypeKind::Result) {
@@ -242,6 +250,8 @@ std::string Type::name() const {
         case TypeKind::Bytes: return "bytes";
         case TypeKind::Vec:
             return "Vec<" + (element ? element->name() : std::string("<unknown>")) + ">";
+        case TypeKind::VecIter:
+            return "VecIter<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Option:
             return "Option<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Result:
@@ -293,6 +303,7 @@ bool operator==(const Type& lhs, const Type& rhs) {
         case TypeKind::Slice:
         case TypeKind::Range:
         case TypeKind::Vec:
+        case TypeKind::VecIter:
         case TypeKind::Option:
             if (!lhs.element || !rhs.element) return lhs.element == rhs.element;
             return *lhs.element == *rhs.element;
