@@ -51,6 +51,7 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::Function: return {pointer, pointer};
         case TypeKind::String:
         case TypeKind::Vec: return {pointer * 3U, pointer};
+        case TypeKind::VecIter: return {pointer * 4U, pointer};
         case TypeKind::Option: {
             if (!type.element) throw std::runtime_error("layout: malformed Option");
             const auto payload = layoutOf(*type.element);

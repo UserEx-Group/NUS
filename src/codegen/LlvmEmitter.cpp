@@ -194,6 +194,7 @@ private:
     void builtinVecPush(const std::vector<mir::Operand>& arguments);
     void builtinVecLen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinVecGet(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinVecIntoIter(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
 
     ModuleEmitter& module_;
     const mir::Function& function_;
@@ -253,6 +254,9 @@ public:
             case TypeKind::Vec:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Vec type");
                 return "{ ptr, " + usizeType() + ", " + usizeType() + " }";
+            case TypeKind::VecIter:
+                if (!type.element) throw std::runtime_error("LLVM codegen: malformed VecIter type");
+                return "{ ptr, " + usizeType() + ", " + usizeType() + ", " + usizeType() + " }";
             case TypeKind::Option:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Option type");
                 return "{ i1, " + llvmType(*type.element) + " }";
@@ -609,6 +613,44 @@ void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& poi
                 out_ << "  br i1 " << cond << ", label %" << body << ", label %" << done << "\n";
                 out_ << body << ":\n";
                 const std::string element_ptr = next("dropvecelem");
+                out_ << "  " << element_ptr << " = getelementptr inbounds " << module_.llvmType(*type.element)
+                     << ", ptr " << data << ", " << module_.usizeType() << ' ' << index << "\n";
+                emitDestroy(*type.element, element_ptr);
+                const std::string next_index = next("dropidx");
+                out_ << "  " << next_index << " = add " << module_.usizeType() << ' ' << index << ", 1\n";
+                out_ << "  store " << module_.usizeType() << ' ' << next_index << ", ptr " << index_slot << "\n";
+                out_ << "  br label %" << head << "\n";
+                out_ << done << ":\n";
+            }
+            out_ << "  call void @free(ptr " << data << ")\n";
+            break;
+        }
+        case TypeKind::VecIter: {
+            if (!type.element) throw std::runtime_error("LLVM codegen: malformed VecIter drop type");
+            const std::string loaded = next("dropiter");
+            const std::string data = next("dropdata");
+            const std::string length = next("droplen");
+            const std::string start_index = next("dropstart");
+            out_ << "  " << loaded << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
+            out_ << "  " << data << " = extractvalue " << module_.llvmType(type) << ' ' << loaded << ", 0\n";
+            out_ << "  " << length << " = extractvalue " << module_.llvmType(type) << ' ' << loaded << ", 1\n";
+            out_ << "  " << start_index << " = extractvalue " << module_.llvmType(type) << ' ' << loaded << ", 3\n";
+            if (!type.element->isCopy() && !type.element->isReference()) {
+                const std::string index_slot = next("dropidxslot");
+                const std::string head = nextLabel("drop.iter.head.");
+                const std::string body = nextLabel("drop.iter.body.");
+                const std::string done = nextLabel("drop.iter.done.");
+                out_ << "  " << index_slot << " = alloca " << module_.usizeType() << "\n";
+                out_ << "  store " << module_.usizeType() << ' ' << start_index << ", ptr " << index_slot << "\n";
+                out_ << "  br label %" << head << "\n";
+                out_ << head << ":\n";
+                const std::string index = next("dropidx");
+                const std::string cond = next("dropcond");
+                out_ << "  " << index << " = load " << module_.usizeType() << ", ptr " << index_slot << "\n";
+                out_ << "  " << cond << " = icmp ult " << module_.usizeType() << ' ' << index << ", " << length << "\n";
+                out_ << "  br i1 " << cond << ", label %" << body << ", label %" << done << "\n";
+                out_ << body << ":\n";
+                const std::string element_ptr = next("dropiterelem");
                 out_ << "  " << element_ptr << " = getelementptr inbounds " << module_.llvmType(*type.element)
                      << ", ptr " << data << ", " << module_.usizeType() << ' ' << index << "\n";
                 emitDestroy(*type.element, element_ptr);
@@ -1015,6 +1057,35 @@ void FunctionEmitter::builtinVecGet(const mir::Instruction& inst, const std::vec
     store(*inst.destination, {element_llvm, loaded});
 }
 
+void FunctionEmitter::builtinVecIntoIter(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: Vec::into_iter expects one receiver");
+    if (arguments[0].type.kind != sema::TypeKind::Vec || !arguments[0].type.element) {
+        throw std::runtime_error("LLVM codegen: Vec::into_iter requires Vec<T> by value");
+    }
+    const auto& destination = local(*inst.destination);
+    if (destination.type.kind != sema::TypeKind::VecIter || !destination.type.element) {
+        throw std::runtime_error("LLVM codegen: Vec::into_iter destination must be VecIter<T>");
+    }
+    const Value source = value(arguments[0]);
+    const std::string target_type = module_.llvmType(destination.type);
+    const std::string data = next("iterdata");
+    const std::string length = next("iterlen");
+    const std::string capacity = next("itercap");
+    out_ << "  " << data << " = extractvalue " << source.type << ' ' << source.repr << ", 0\n";
+    out_ << "  " << length << " = extractvalue " << source.type << ' ' << source.repr << ", 1\n";
+    out_ << "  " << capacity << " = extractvalue " << source.type << ' ' << source.repr << ", 2\n";
+    const std::string one = next("iter");
+    const std::string two = next("iter");
+    const std::string three = next("iter");
+    const std::string four = next("iter");
+    out_ << "  " << one << " = insertvalue " << target_type << " poison, ptr " << data << ", 0\n";
+    out_ << "  " << two << " = insertvalue " << target_type << ' ' << one << ", " << module_.usizeType() << ' ' << length << ", 1\n";
+    out_ << "  " << three << " = insertvalue " << target_type << ' ' << two << ", " << module_.usizeType() << ' ' << capacity << ", 2\n";
+    out_ << "  " << four << " = insertvalue " << target_type << ' ' << three << ", " << module_.usizeType() << " 0, 3\n";
+    store(*inst.destination, {target_type, four});
+    markMoved(arguments[0]);
+}
+
 void FunctionEmitter::instruction(const mir::Instruction& inst) {
     using mir::InstructionKind;
     switch (inst.kind) {
@@ -1122,6 +1193,7 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (callee.text == "vec_push_i32" || callee.text.rfind("__builtin_vec_push$", 0) == 0) { builtinVecPush(arguments); return; }
             if (callee.text == "vec_len_i32" || callee.text.rfind("__builtin_vec_len$", 0) == 0) { builtinVecLen(inst, arguments); return; }
             if (callee.text == "vec_get_i32" || callee.text.rfind("__builtin_vec_get$", 0) == 0) { builtinVecGet(inst, arguments); return; }
+            if (callee.text.rfind("__builtin_vec_into_iter$", 0) == 0) { builtinVecIntoIter(inst, arguments); return; }
             if (callee.text.rfind("__builtin_some$", 0) == 0 || callee.text.rfind("__builtin_none$", 0) == 0 ||
                 callee.text.rfind("__builtin_ok$", 0) == 0 || callee.text.rfind("__builtin_err$", 0) == 0) {
                 if (!inst.destination) throw std::runtime_error("LLVM codegen: tagged constructor requires destination");
@@ -1384,48 +1456,109 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
         }
         case InstructionKind::IterInit: {
             if (!inst.destination || inst.operands.empty()) return;
-            store(*inst.destination, value(inst.operands.front()));
+            const auto& destination = local(*inst.destination);
+            const auto& source_operand = inst.operands.front();
+            if (destination.type.kind == sema::TypeKind::VecIter && source_operand.type.kind == sema::TypeKind::Vec) {
+                if (!destination.type.element || !source_operand.type.element) throw std::runtime_error("LLVM codegen: malformed Vec iterator");
+                const Value source = value(source_operand);
+                const std::string target_type = module_.llvmType(destination.type);
+                const std::string data = next("iterdata");
+                const std::string length = next("iterlen");
+                const std::string capacity = next("itercap");
+                out_ << "  " << data << " = extractvalue " << source.type << ' ' << source.repr << ", 0\n";
+                out_ << "  " << length << " = extractvalue " << source.type << ' ' << source.repr << ", 1\n";
+                out_ << "  " << capacity << " = extractvalue " << source.type << ' ' << source.repr << ", 2\n";
+                const std::string one = next("iter");
+                const std::string two = next("iter");
+                const std::string three = next("iter");
+                const std::string four = next("iter");
+                out_ << "  " << one << " = insertvalue " << target_type << " poison, ptr " << data << ", 0\n";
+                out_ << "  " << two << " = insertvalue " << target_type << ' ' << one << ", " << module_.usizeType() << ' ' << length << ", 1\n";
+                out_ << "  " << three << " = insertvalue " << target_type << ' ' << two << ", " << module_.usizeType() << ' ' << capacity << ", 2\n";
+                out_ << "  " << four << " = insertvalue " << target_type << ' ' << three << ", " << module_.usizeType() << " 0, 3\n";
+                store(*inst.destination, {target_type, four});
+                markMoved(source_operand);
+            } else {
+                store(*inst.destination, value(source_operand));
+                if (!source_operand.type.isCopy() && !source_operand.type.isReference()) markMoved(source_operand);
+            }
             break;
         }
         case InstructionKind::IterHasNext: {
             if (!inst.destination || inst.operands.empty()) return;
             const auto& iterator = inst.operands.front();
             const Value range = value(iterator);
-            if (iterator.type.kind != sema::TypeKind::Range || !iterator.type.element) throw std::runtime_error("LLVM codegen: iterator is not a range");
-            const std::string element_type = module_.llvmType(*iterator.type.element);
-            const std::string start = next("start");
-            const std::string end = next("end");
-            const std::string inclusive = next("inclusive");
-            const std::string less = next("less");
-            const std::string less_equal = next("lesseq");
-            const std::string result = next("hasnext");
-            out_ << "  " << start << " = extractvalue " << range.type << ' ' << range.repr << ", 0\n";
-            out_ << "  " << end << " = extractvalue " << range.type << ' ' << range.repr << ", 1\n";
-            out_ << "  " << inclusive << " = extractvalue " << range.type << ' ' << range.repr << ", 2\n";
-            const bool signed_element = iterator.type.element->isSignedInteger();
-            out_ << "  " << less << " = icmp " << (signed_element ? "slt" : "ult") << ' ' << element_type << ' ' << start << ", " << end << "\n";
-            out_ << "  " << less_equal << " = icmp " << (signed_element ? "sle" : "ule") << ' ' << element_type << ' ' << start << ", " << end << "\n";
-            out_ << "  " << result << " = select i1 " << inclusive << ", i1 " << less_equal << ", i1 " << less << "\n";
-            store(*inst.destination, {"i1", result});
-            break;
+            if (iterator.type.kind == sema::TypeKind::Range && iterator.type.element) {
+                const std::string element_type = module_.llvmType(*iterator.type.element);
+                const std::string start = next("start");
+                const std::string end = next("end");
+                const std::string inclusive = next("inclusive");
+                const std::string less = next("less");
+                const std::string less_equal = next("lesseq");
+                const std::string result = next("hasnext");
+                out_ << "  " << start << " = extractvalue " << range.type << ' ' << range.repr << ", 0\n";
+                out_ << "  " << end << " = extractvalue " << range.type << ' ' << range.repr << ", 1\n";
+                out_ << "  " << inclusive << " = extractvalue " << range.type << ' ' << range.repr << ", 2\n";
+                const bool signed_element = iterator.type.element->isSignedInteger();
+                out_ << "  " << less << " = icmp " << (signed_element ? "slt" : "ult") << ' ' << element_type << ' ' << start << ", " << end << "\n";
+                out_ << "  " << less_equal << " = icmp " << (signed_element ? "sle" : "ule") << ' ' << element_type << ' ' << start << ", " << end << "\n";
+                out_ << "  " << result << " = select i1 " << inclusive << ", i1 " << less_equal << ", i1 " << less << "\n";
+                store(*inst.destination, {"i1", result});
+                break;
+            }
+            if (iterator.type.kind == sema::TypeKind::VecIter && iterator.type.element) {
+                const std::string length = next("iterlen");
+                const std::string index = next("iteridx");
+                const std::string result = next("hasnext");
+                out_ << "  " << length << " = extractvalue " << range.type << ' ' << range.repr << ", 1\n";
+                out_ << "  " << index << " = extractvalue " << range.type << ' ' << range.repr << ", 3\n";
+                out_ << "  " << result << " = icmp ult " << module_.usizeType() << ' ' << index << ", " << length << "\n";
+                store(*inst.destination, {"i1", result});
+                break;
+            }
+            throw std::runtime_error("LLVM codegen: unsupported iterator type `" + iterator.type.name() + "`");
         }
         case InstructionKind::IterNext: {
             if (!inst.destination || inst.operands.empty()) return;
             const auto& iterator = inst.operands.front();
-            if (iterator.kind != mir::OperandKind::Local || iterator.type.kind != sema::TypeKind::Range || !iterator.type.element) {
-                throw std::runtime_error("LLVM codegen: iter.next requires a local range iterator");
+            if (iterator.kind != mir::OperandKind::Local) throw std::runtime_error("LLVM codegen: iter.next requires a local iterator");
+            const Value aggregate = value(iterator);
+            if (iterator.type.kind == sema::TypeKind::Range && iterator.type.element) {
+                const std::string element_type = module_.llvmType(*iterator.type.element);
+                const std::string start = next("next");
+                const std::string incremented = next("inc");
+                const std::string updated = next("range");
+                out_ << "  " << start << " = extractvalue " << aggregate.type << ' ' << aggregate.repr << ", 0\n";
+                out_ << "  " << incremented << " = add " << element_type << ' ' << start << ", 1\n";
+                out_ << "  " << updated << " = insertvalue " << aggregate.type << ' ' << aggregate.repr << ", " << element_type << ' ' << incremented << ", 0\n";
+                out_ << "  store " << aggregate.type << ' ' << updated << ", ptr " << slot(iterator.local) << "\n";
+                store(*inst.destination, {element_type, start});
+                break;
             }
-            const Value range = value(iterator);
-            const std::string element_type = module_.llvmType(*iterator.type.element);
-            const std::string start = next("next");
-            const std::string incremented = next("inc");
-            const std::string updated = next("range");
-            out_ << "  " << start << " = extractvalue " << range.type << ' ' << range.repr << ", 0\n";
-            out_ << "  " << incremented << " = add " << element_type << ' ' << start << ", 1\n";
-            out_ << "  " << updated << " = insertvalue " << range.type << ' ' << range.repr << ", " << element_type << ' ' << incremented << ", 0\n";
-            out_ << "  store " << range.type << ' ' << updated << ", ptr " << slot(iterator.local) << "\n";
-            store(*inst.destination, {element_type, start});
-            break;
+            if (iterator.type.kind == sema::TypeKind::VecIter && iterator.type.element) {
+                const std::string element_type = module_.llvmType(*iterator.type.element);
+                const std::string data = next("iterdata");
+                const std::string length = next("iterlen");
+                const std::string index = next("iteridx");
+                const std::string in_bounds = next("iterbounds");
+                const std::string element_ptr = next("iterelem");
+                const std::string loaded = next("itervalue");
+                const std::string incremented = next("iteridx");
+                const std::string updated = next("iter");
+                out_ << "  " << data << " = extractvalue " << aggregate.type << ' ' << aggregate.repr << ", 0\n";
+                out_ << "  " << length << " = extractvalue " << aggregate.type << ' ' << aggregate.repr << ", 1\n";
+                out_ << "  " << index << " = extractvalue " << aggregate.type << ' ' << aggregate.repr << ", 3\n";
+                out_ << "  " << in_bounds << " = icmp ult " << module_.usizeType() << ' ' << index << ", " << length << "\n";
+                out_ << "  call void @nus_assert(i1 " << in_bounds << ")\n";
+                out_ << "  " << element_ptr << " = getelementptr inbounds " << element_type << ", ptr " << data << ", " << module_.usizeType() << ' ' << index << "\n";
+                out_ << "  " << loaded << " = load " << element_type << ", ptr " << element_ptr << "\n";
+                out_ << "  " << incremented << " = add " << module_.usizeType() << ' ' << index << ", 1\n";
+                out_ << "  " << updated << " = insertvalue " << aggregate.type << ' ' << aggregate.repr << ", " << module_.usizeType() << ' ' << incremented << ", 3\n";
+                out_ << "  store " << aggregate.type << ' ' << updated << ", ptr " << slot(iterator.local) << "\n";
+                store(*inst.destination, {element_type, loaded});
+                break;
+            }
+            throw std::runtime_error("LLVM codegen: unsupported iterator type `" + iterator.type.name() + "`");
         }
         case InstructionKind::Drop:
             emitDrop(inst, false);

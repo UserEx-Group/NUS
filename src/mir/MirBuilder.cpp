@@ -175,7 +175,7 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
                     call_type.parameters.insert(call_type.parameters.begin(), receiver_type);
                 }
                 operands.push_back(Operand{.kind = OperandKind::Global,
-                                           .text = owner + "::" + callee_expr.text,
+                                           .text = callee_expr.flag ? callee_expr.text : owner + "::" + callee_expr.text,
                                            .type = std::move(call_type)});
                 if (callee_expr.receiver == hir::ReceiverMode::Shared && object_expr.type.kind != sema::TypeKind::Reference) {
                     const auto ref_type = sema::Type::reference(object_expr.type, false);
@@ -422,7 +422,11 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
         }
         case hir::ExprKind::For: {
             const Operand iterable = lowerExpr(*expression.operands.at(0));
-            const LocalId iterator = createTemp(expression.operands.at(0)->type);
+            sema::Type iterator_type = expression.operands.at(0)->type;
+            if (iterator_type.kind == sema::TypeKind::Vec && iterator_type.element) {
+                iterator_type = sema::Type::vectorIterator(*iterator_type.element);
+            }
+            const LocalId iterator = createTemp(iterator_type);
             emit(Instruction{.kind = InstructionKind::IterInit, .destination = iterator,
                              .operands = {iterable}, .span = expression.span});
             const BlockId head = createBlock();

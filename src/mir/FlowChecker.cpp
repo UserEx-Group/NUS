@@ -261,9 +261,13 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
     const auto preds = predecessors(function);
     std::unordered_map<BlockId, StateVector> in_state;
     std::unordered_map<BlockId, StateVector> out_state;
+    // Start non-entry blocks at the dataflow bottom. Initializing loop predecessors as
+    // `Uninitialized` permanently polluted joins with a path that does not actually
+    // exist yet, producing false "may be unavailable" diagnostics for loop-carried
+    // non-Copy iterators.
     for (const auto& block : function.blocks) {
-        in_state[block.id] = StateVector(count, Uninitialized);
-        out_state[block.id] = StateVector(count, Uninitialized);
+        in_state[block.id] = StateVector(count, 0U);
+        out_state[block.id] = StateVector(count, 0U);
     }
     in_state[function.entry] = entryState(function);
 
