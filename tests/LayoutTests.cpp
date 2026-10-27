@@ -49,9 +49,11 @@ int main() {
     const auto socket_addr_layout = layouts.layoutOf(Type::simple(TypeKind::SocketAddr));
     if (socket_addr_layout.size != 8 || socket_addr_layout.alignment != 4) fail("SocketAddr ABI mismatch");
     const auto error_layout = layouts.layoutOf(Type::simple(TypeKind::NetworkError));
-    if (error_layout.size != 4 || error_layout.alignment != 4) fail("NetworkError ABI mismatch");
+    if (error_layout.size != 8 || error_layout.alignment != 4) fail("NetworkError ABI mismatch");
     const auto tcp_layout = layouts.layoutOf(Type::simple(TypeKind::TcpStream));
     if (tcp_layout.size != 8 || tcp_layout.alignment != 8) fail("TcpStream ABI mismatch");
+    const auto listener_layout = layouts.layoutOf(Type::simple(TypeKind::TcpListener));
+    if (listener_layout.size != 8 || listener_layout.alignment != 8) fail("TcpListener ABI mismatch");
     const auto udp_layout = layouts.layoutOf(Type::simple(TypeKind::UdpSocket));
     if (udp_layout.size != 8 || udp_layout.alignment != 8) fail("UdpSocket ABI mismatch");
 
