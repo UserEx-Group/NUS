@@ -157,4 +157,10 @@ Methods from generic `impl<T>` blocks are monomorphized on demand. Semantic anal
 
 `Vec<T>` now supports native instance operations `push`, `len`, `get` and `into_iter`. Consuming `for` lowers a vector into an owned `VecIter<T>` runtime aggregate containing `{ data, len, cap, index }`. Iterator MIR checks `index < len`, loads the current element, advances the index, and drop glue releases only the not-yet-consumed suffix on early destruction.
 
-Borrowing iterators are intentionally not lowered yet because their correctness depends on reference-return lifetime relationships that are outside the current lifetime model.
+## Milestone 14 additions
+
+Borrowed vector iterators now lower natively. `VecRefIter<T>` and `VecMutIter<T>` use `{ data, len, index }`; `IterNext` yields an element pointer, so shared iteration produces `&T` and mutable iteration produces `&mut T` without copying the element. These iterator values carry MIR loan provenance and never free the vector allocation.
+
+Reference-return calls also carry their originating loan through MIR. The current source-level lifetime model uses conservative elision: a free function returning a reference must have one unambiguous borrowed input, while a borrowed method receiver is the preferred origin.
+
+Consuming `VecIter<T>` no longer requires `T: Copy`. Non-Copy loop bindings receive conditional per-iteration drop cleanup, and the iterator owns only the still-unconsumed suffix. Mutable dereference assignment lowers to `store.deref`, enabling code such as `*item += 1` inside `iter_mut()` loops.

@@ -1,4 +1,4 @@
-# NUS Native ABI — through Milestone 13
+# NUS Native ABI — through Milestone 14
 
 This document records the first explicit native ABI contract used by the bootstrap compiler. It is intentionally versioned and unstable before NUS 1.0.
 
@@ -88,3 +88,17 @@ VecIter<T> {
 On a 64-bit target this is 32 bytes with 8-byte alignment. `Vec<T>::into_iter` transfers the vector allocation into this iterator and clears ownership from the source vector. The index denotes the first not-yet-yielded element.
 
 Dropping an unfinished iterator destroys remaining non-Copy elements from `index` through `len` and then releases `data`. The source vector must not drop the transferred allocation.
+
+## Borrowed vector iterators — Milestone 14
+
+Borrowed iterators do not own the vector allocation. Both use three words:
+
+```text
+VecRefIter<T> / VecMutIter<T> {
+    ptr data,
+    usize len,
+    usize index,
+}
+```
+
+On a 64-bit target each is 24 bytes with 8-byte alignment. Their distinction is semantic: `VecRefIter<T>` carries a shared loan and yields `&T`; `VecMutIter<T>` carries an exclusive loan and yields `&mut T`. Dropping either iterator releases only the MIR loan; it never frees `data`.

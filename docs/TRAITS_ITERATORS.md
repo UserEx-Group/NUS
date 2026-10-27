@@ -1,6 +1,6 @@
-# NUS Traits, Generic Impls & Owned Iterators — Milestone 13
+# NUS Traits, Generic Impls & Iterators — through Milestone 14
 
-Milestone 13 turns traits from marker-only capabilities into statically checked interfaces with methods and associated types, adds generic `impl<T>` blocks, and introduces an owned vector iterator that can be lowered safely without reference-return lifetimes.
+Milestone 13 turned traits from marker-only capabilities into statically checked interfaces with methods and associated types, added generic `impl<T>` blocks, and introduced owned vector iteration. Milestone 14 extends that iterator model with shared/mutable borrowed iterators, interprocedural lifetime elision, and non-`Copy` consuming yields.
 
 ## Trait methods
 
@@ -153,38 +153,37 @@ VecIter<T> {
 
 `IterHasNext` checks `index < len`. `IterNext` loads the element at `index` and then increments the stored index. If the iterator is dropped early, drop glue destroys only the not-yet-consumed elements before freeing the allocation.
 
-## Why there is no `.iter()` yet
+## Borrowed iteration — Milestone 14
 
-A borrowing iterator would need to return/reference data owned by a vector and prove that the vector remains alive and cannot be invalidated by reallocation for the entire iterator lifetime. NUS does not yet have reference-return lifetime inference or lifetime parameters in source syntax.
+Borrowed vector iteration is now available:
 
-Rather than make an unsound borrowed iterator, Milestone 13 deliberately provides only consuming iteration. `.iter()` and `.iter_mut()` are deferred until the lifetime model can express them safely.
+```nus
+for value in values.iter() {
+    print(*value);
+}
 
-## Current non-Copy iteration boundary
+for value in values.iter_mut() {
+    *value += 1;
+}
+```
 
-`for` over `Vec<T>`/`VecIter<T>` currently requires `T: Copy`.
+`iter()` yields `&T` through `VecRefIter<T>` and keeps a shared loan of the vector alive. `iter_mut()` yields `&mut T` through `VecMutIter<T>` and keeps an exclusive loan alive. Both loans are tracked through MIR carriers, so vector operations that could invalidate the backing buffer are rejected until the iterator's last use.
 
-The iterator itself already owns the backing allocation and can correctly destroy unconsumed non-Copy elements on early exit. What is still missing is complete destruction/move accounting for each non-Copy loop binding after an element has been yielded. Rejecting this case prevents leaks or double-destruction until per-iteration ownership is modeled precisely.
+Borrowed iterators do not own or free the vector allocation. Their native shape is `{ ptr data, usize len, usize index }`.
 
-Non-Copy elements may still be stored safely in `Vec<T>` and are recursively destroyed by vector drop glue when the vector itself owns them.
+## Non-Copy consuming iteration
 
-## Flow-analysis correction
+The M13 `T: Copy` restriction has been removed. Owned iteration can now move values such as `string` out of a vector one element at a time. The loop binding is conditionally dropped at the end of each iteration; moving the binding clears its drop flag. `break` and `continue` run the same cleanup, while the iterator destructor destroys only elements from its current index onward.
 
-Milestone 13 also fixes a loop fixed-point issue in MIR ownership dataflow. Unvisited predecessor states now begin at the lattice bottom instead of an artificial `Uninitialized` state. This prevents a future loop-back edge from contaminating the first merge and falsely reporting owned iterator temporaries as unavailable.
+## Current boundaries
 
-## Deferred features
+The iterator/trait layer still intentionally defers:
 
-The current trait/iterator model intentionally does not yet provide:
-
-- default trait methods;
+- named lifetime parameters and lifetime bounds;
+- reference fields in user structs/enums;
 - generic methods declared directly inside a trait;
-- `where` clauses;
-- supertraits;
-- associated constants;
-- associated-type constraints such as `Iterator<Item = T>` in bounds;
-- trait objects, `dyn`, vtables or dynamic dispatch;
-- specialization and complete overlap/coherence checking for generic impls;
-- borrowing `.iter()` / `.iter_mut()`;
-- non-Copy values yielded by `for`;
+- `where` clauses, supertraits and associated constants;
+- trait objects / dynamic dispatch;
 - user-defined generic structs/enums.
 
-These boundaries keep dispatch static, monomorphized and compatible with the current ownership model.
+See `docs/LIFETIMES.md` for the lifetime-elision and loan-provenance rules introduced in Milestone 14.

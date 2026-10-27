@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 13 — Trait Interfaces, Generic Impls & Owned Iterators
+## Milestone 14 — Lifetimes, Borrowed Iterators & Non-Copy Iteration
 
-NUS now has statically checked trait methods and associated types, generic `impl<T>` blocks with on-demand monomorphization, idiomatic `Vec<T>` instance methods, and consuming vector iteration through an owned `VecIter<T>` runtime value.
+NUS now propagates borrow provenance across calls, supports safe elided reference returns, exposes shared/mutable borrowed vector iterators, and can consume non-`Copy` vector elements with per-iteration drop accounting.
 
 ```text
 .nus
@@ -178,7 +178,29 @@ VecIter<T> {
 
 Iteration consumes the original vector. An iterator dropped before exhaustion destroys only its remaining owned elements and then frees the backing allocation.
 
-Milestone 13 intentionally does **not** expose borrowing `.iter()` / `.iter_mut()` yet. Those require reference-return lifetime relationships that NUS does not currently express. `for` over `Vec<T>` / `VecIter<T>` also currently requires `T: Copy` until per-iteration non-Copy ownership/drop accounting is complete.
+Milestone 14 adds both borrowing forms:
+
+```nus
+for value in values.iter() {
+    print(*value);
+}
+
+for value in values.iter_mut() {
+    *value += 1;
+}
+```
+
+Shared/mutable iterator loans remain attached to the original vector through MIR/NLL, so reallocating or directly using the vector incompatibly while an iterator is live is rejected. Owned iteration no longer requires `T: Copy`; yielded non-Copy values are conditionally dropped once per iteration.
+
+## Elided reference lifetimes
+
+A reference can now cross a function boundary when its origin is unambiguous:
+
+```nus
+fn identity(value: &i32) -> &i32 { value }
+```
+
+At the call site, the returned reference carries the original loan. NLL allows the owner to be mutated again after the returned reference's last use. Multiple borrowed inputs are rejected for reference returns until named lifetime syntax is introduced. Methods with `&self` / `&mut self` use the receiver as the elided output origin.
 
 ## Enums and errors
 
@@ -220,7 +242,7 @@ fn connect(okay: bool) -> Result<i32, string> {
 
 ## Tests
 
-Milestone 13 contains twenty suites:
+Milestone 14 contains twenty-four suites:
 
 ```text
 lexer
@@ -243,12 +265,18 @@ traits
 trait_native
 iterators
 iterator_native
+lifetimes
+lifetime_native
+borrowed_iterators
+borrowed_iterator_native
 ```
 
-The new native suites exercise concrete trait methods/associated types, generic trait impls, generic method specialization, `Vec<T>` method syntax, consuming `for`, explicit `into_iter`, and native iterator ownership/drop behavior.
+The native suites now cover concrete trait methods/associated types, generic impl specialization, owned and borrowed vector iteration, interprocedural reference-return provenance, mutable dereference stores, non-`Copy` loop yields, and native ownership/drop behavior.
 
 ## Current boundaries
 
-Still deferred: user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, borrowing iterators, non-Copy loop yields, reference-return lifetimes, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs and optimized vector growth.
+Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs and optimized vector growth.
 
 See [`docs/TRAITS_ITERATORS.md`](docs/TRAITS_ITERATORS.md), [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
+
+For the exact Milestone 14 lifetime rules and current boundaries, see `docs/LIFETIMES.md`.

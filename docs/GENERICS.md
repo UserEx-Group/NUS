@@ -1,4 +1,4 @@
-# NUS Generics & Static Traits — through Milestone 13
+# NUS Generics & Static Traits — through Milestone 14
 
 NUS uses monomorphization-first compile-time polymorphism. Generic source functions and generic impl methods are templates; only concrete specializations used by the program reach HIR, MIR and LLVM.
 

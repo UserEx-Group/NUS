@@ -56,6 +56,10 @@ fn inspect(packet: &Packet) {
     print(packet.route_key());
 }
 
+fn packet_view(packet: &Packet) -> &Packet {
+    packet
+}
+
 fn rewrite(packet: &mut Packet, source: u32) {
     packet.source = source;
 }
@@ -87,10 +91,11 @@ fn main() {
     inspect(&packet);
     rewrite(&mut packet, 42);
 
-    let view = &packet;
+    let view = packet_view(&packet);
     print(view.source, view.payload_size);
 
-    // NLL: the shared loan ends after the last use of `view`.
+    // M14 NLL: the returned reference carries the call-site loan,
+    // which ends after the last use of `view`.
     packet.set_source(64);
 
     print(route_class(&packet), identity(99));
@@ -106,16 +111,24 @@ fn main() {
     print(samples.count(), samples.get(1));
 
     let mut sum = 0;
-    for sample in samples {
-        sum += sample;
+    for sample in samples.iter() {
+        sum += *sample;
     }
     print(sum);
+
+    for sample in samples.iter_mut() {
+        *sample += 1;
+    }
+    print(samples.get(0), samples.get(2));
 
     let item_literal = "owned-in-vector";
     let item = string_clone(&item_literal);
     let mut names: Vec<string> = vec_new::<string>();
     names.push(item);
-    print(names.len());
+    // Non-Copy values can now be moved out one iteration at a time.
+    for name in names {
+        print(name);
+    }
 
     let status = RouteStatus::Ready(8080);
     let status_port = match status {

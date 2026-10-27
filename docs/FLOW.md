@@ -1,4 +1,4 @@
-# NUS MIR Flow Analysis — through Milestone 13
+# NUS MIR Flow Analysis — through Milestone 14
 
 Milestone 8 introduces control-flow-sensitive ownership analysis on MIR.
 
@@ -32,7 +32,7 @@ loan L0 {
 }
 ```
 
-When a reference is assigned to another reference local, loan identity propagates to that local. A loan remains active while any local carrying it is live. This allows a borrow to end at its last real use instead of at the closing brace of the source block.
+Loan identity propagates through reference assignments and, as of Milestone 14, through borrow-carrying call results and iterators. Returned `&T`, `VecRefIter<T>` and `VecMutIter<T>` therefore keep the originating loan alive even after the temporary reference passed to a call is dead. A loan remains active while any carrier is live, so NLL still ends it at the last real use.
 
 ## Move states
 
@@ -78,16 +78,16 @@ Definitely moved/uninitialized values receive no drop.
 
 ## Current limitations
 
-Milestone 8 intentionally does not solve every lifetime problem. It does not yet provide:
+Milestone 14 adds conservative interprocedural borrow provenance and reference-return lifetime elision, but the lifetime model is still intentionally smaller than a full named-region system. It does not yet provide:
 
-- lifetime parameters in source syntax;
-- reference-return inference;
-- reference fields;
+- named lifetime parameters or lifetime bounds in source syntax;
+- reference fields in user aggregates;
+- arbitrary returned field/index projections;
 - partial-move tracking per struct field;
-- interprocedural lifetime relationships;
-- precise alias analysis for arbitrary pointer-derived places.
+- lifetime-bearing user-defined aggregate types;
+- precise alias analysis for arbitrary raw-pointer-derived places.
 
-The current goal is a sound and inspectable CFG-local ownership foundation for native code generation.
+The current goal remains a sound and inspectable ownership model while extending NLL across the specific interprocedural relationships the compiler can prove.
 
 ## Consuming iterators — Milestone 13
 
@@ -97,4 +97,4 @@ Loop dataflow now initializes unvisited non-entry block states at the lattice bo
 
 `VecIter<T>` drop glue is progress-aware. Because the iterator stores its current index, an early exit destroys only the elements not yet yielded and then frees the backing allocation.
 
-Iteration over `Vec<T>` / `VecIter<T>` currently requires `T: Copy`. Complete per-iteration move/drop accounting for non-Copy yielded bindings remains deferred. Borrowing `.iter()` / `.iter_mut()` is also deferred until reference-return lifetime relationships can be expressed soundly.
+Milestone 14 removes the `T: Copy` restriction for consuming iteration. Each non-Copy loop binding receives conditional per-iteration cleanup, including `break`/`continue` paths, while `VecIter<T>` owns only the not-yet-yielded suffix. Borrowing `.iter()` and `.iter_mut()` are represented by three-word borrow-carrying iterators and participate in the same liveness-derived NLL analysis.

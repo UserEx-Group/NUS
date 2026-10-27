@@ -70,4 +70,8 @@ The generic vector runtime can now be reached through instance syntax: `push`, `
 
 `Vec<T>::into_iter` transfers the backing allocation into `VecIter<T> { data, len, cap, index }`; the source vector is marked moved. Iterator drop glue destroys only elements at positions `index..len` before freeing the allocation. Direct `for value in vector` performs the same ownership transfer implicitly.
 
-Borrowing iterators are not part of this milestone. Returning references into a vector requires lifetime relationships that NUS does not yet model across function/method boundaries.
+## Milestone 14 borrowed iterators and non-Copy yields
+
+`Vec<T>::iter()` and `iter_mut()` now create borrowed runtime iterators with `{ data, len, index }`. They carry shared or exclusive MIR loan provenance respectively but do not own or free the backing allocation. NLL releases that loan after the iterator/result's last use.
+
+Owned iteration can now move non-`Copy` elements out one at a time. Each yielded loop binding has conditional cleanup, while `VecIter<T>` destroys only elements at its current index and beyond when dropped. This divides ownership cleanly between already-yielded bindings and the still-owned iterator suffix.
