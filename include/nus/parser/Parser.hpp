@@ -32,7 +32,7 @@ private:
     void synchronizeTopLevel();
     void synchronizeStatement();
 
-    [[nodiscard]] std::optional<ast::FunctionDecl> parseFunction(bool allow_receiver = false);
+    [[nodiscard]] std::optional<ast::FunctionDecl> parseFunction(bool allow_receiver = false, bool require_body = true);
     [[nodiscard]] std::optional<ast::StructDecl> parseStruct();
     [[nodiscard]] std::optional<ast::EnumDecl> parseEnum();
     [[nodiscard]] std::optional<ast::TraitDecl> parseTrait();

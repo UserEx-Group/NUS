@@ -36,6 +36,9 @@ int main() {
     const auto vector_layout = layouts.layoutOf(Type::vector(Type::simple(TypeKind::I32)));
     if (vector_layout.size != 24 || vector_layout.alignment != 8) fail("64-bit Vec ABI must be three words");
 
+    const auto iterator_layout = layouts.layoutOf(Type::vectorIterator(Type::simple(TypeKind::I32)));
+    if (iterator_layout.size != 32 || iterator_layout.alignment != 8) fail("64-bit VecIter ABI must be four words");
+
     const auto packet_layout = layouts.layoutOfStruct("Packet");
     if (packet_layout.layout.size != 16 || packet_layout.layout.alignment != 8) fail("Packet layout mismatch");
     if (packet_layout.fields.size() != 3 || packet_layout.fields[0].offset != 0 ||
