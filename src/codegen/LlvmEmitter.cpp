@@ -200,7 +200,13 @@ private:
     void builtinSocketAddr(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinSocketPort(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinNetworkErrorCode(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinNetworkErrorReason(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinDnsResolveIpv4(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinTcpConnect(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinTcpListen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinTcpAccept(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinTcpSetNoDelay(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinTcpSetTimeout(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinTcpSend(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinTcpReceive(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinUdpBind(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
@@ -208,6 +214,7 @@ private:
     void builtinUdpReceive(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     [[nodiscard]] std::string emitSockaddrIn(const Value& address);
     [[nodiscard]] Value emitNetworkResult(const sema::Type& result_type, bool is_error, const Value& payload);
+    [[nodiscard]] Value emitNetworkError(int code, std::optional<int> fixed_reason = std::nullopt);
     [[nodiscard]] std::string socketHandleForCall(const Value& stream);
 
     ModuleEmitter& module_;
@@ -226,7 +233,7 @@ public:
 
     std::string run() {
         std::ostringstream out;
-        out << "; NUS LLVM IR - milestone 15\n";
+        out << "; NUS LLVM IR - milestone 16\n";
         out << "; target: " << target_.description() << "\n";
         if (!target_.triple.empty()) out << "target triple = \"" << target_.triple << "\"\n";
         out << "\n";
@@ -241,12 +248,17 @@ public:
         out << "declare ptr @memcpy(ptr, ptr, " << usizeType() << ")\n";
         out << "declare i16 @htons(i16)\n";
         out << "declare i32 @htonl(i32)\n";
+        out << "declare i32 @ntohl(i32)\n";
+        out << "declare ptr @gethostbyname(ptr)\n";
         if (windowsTarget()) {
             out << "declare i32 @WSAStartup(i16, ptr)\n";
             out << "declare i32 @WSAGetLastError()\n";
             out << "declare i64 @socket(i32, i32, i32)\n";
             out << "declare i32 @connect(i64, ptr, i32)\n";
             out << "declare i32 @bind(i64, ptr, i32)\n";
+            out << "declare i32 @listen(i64, i32)\n";
+            out << "declare i64 @accept(i64, ptr, ptr)\n";
+            out << "declare i32 @setsockopt(i64, i32, i32, ptr, i32)\n";
             out << "declare i32 @send(i64, ptr, i32, i32)\n";
             out << "declare i32 @sendto(i64, ptr, i32, i32, ptr, i32)\n";
             out << "declare i32 @recv(i64, ptr, i32, i32)\n";
@@ -255,13 +267,19 @@ public:
             out << "declare i32 @socket(i32, i32, i32)\n";
             out << "declare i32 @connect(i32, ptr, i32)\n";
             out << "declare i32 @bind(i32, ptr, i32)\n";
+            out << "declare i32 @listen(i32, i32)\n";
+            out << "declare i32 @accept(i32, ptr, ptr)\n";
+            out << "declare i32 @setsockopt(i32, i32, i32, ptr, i32)\n";
             out << "declare i64 @send(i32, ptr, i64, i32)\n";
             out << "declare i64 @sendto(i32, ptr, i64, i32, ptr, i32)\n";
             out << "declare i64 @recv(i32, ptr, i64, i32)\n";
             out << "declare i32 @close(i32)\n";
+            if (darwinTarget()) out << "declare ptr @__error()\n";
+            else out << "declare ptr @__errno_location()\n";
         }
         out << "\n";
         emitNetworkInitHelper(out);
+        emitNetworkErrorHelpers(out);
         emitAssertHelper(out);
         for (const auto& function : program_.functions) FunctionEmitter(*this, function, out).emit();
         emitMainWrapper(out);
@@ -292,6 +310,7 @@ public:
             case TypeKind::SocketAddr: return "%nus.socketaddr";
             case TypeKind::NetworkError: return "%nus.neterr";
             case TypeKind::TcpStream: return "%nus.tcpstream";
+            case TypeKind::TcpListener: return "%nus.tcplistener";
             case TypeKind::UdpSocket: return "%nus.udpsocket";
             case TypeKind::Vec:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Vec type");
@@ -333,6 +352,7 @@ public:
 
     [[nodiscard]] std::string usizeType() const { return target_.pointer_bits == 32U ? "i32" : "i64"; }
     [[nodiscard]] bool windowsTarget() const { return target_.triple.find("windows") != std::string::npos; }
+    [[nodiscard]] bool darwinTarget() const { return target_.triple.find("darwin") != std::string::npos || target_.triple.find("apple") != std::string::npos; }
     [[nodiscard]] const mir::Struct& structure(std::string_view name) const {
         for (const auto& structure : program_.structs) if (structure.name == name) return structure;
         throw std::runtime_error("LLVM codegen: unknown struct `" + std::string(name) + "`");
@@ -401,9 +421,12 @@ private:
         out << "%nus.bytes = type { ptr, " << usizeType() << " }\n";
         out << "%nus.ipaddr = type { i32 }\n";
         out << "%nus.socketaddr = type { %nus.ipaddr, i16 }\n";
-        out << "%nus.neterr = type { i32 }\n";
+        out << "%nus.neterr = type { i32, i32 }\n";
         out << "%nus.tcpstream = type { i64 }\n";
+        out << "%nus.tcplistener = type { i64 }\n";
         out << "%nus.udpsocket = type { i64 }\n";
+        out << "%nus.hostent = type { ptr, ptr, i32, i32, ptr }\n";
+        out << "%nus.timeval = type { i64, i64 }\n";
         out << "%nus.sockaddr.in = type { i16, i16, i32, [8 x i8] }\n";
         for (const auto& structure : program_.structs) {
             out << structSymbol(structure.name) << " = type { ";
@@ -451,6 +474,39 @@ private:
             emitGlobalCString(out, value.name, value.bytes);
         }
         if (!strings_.empty()) out << '\n';
+    }
+
+    void emitNetworkErrorHelpers(std::ostringstream& out) const {
+        out << "define internal i32 @nus_net_last_error() {\n";
+        out << "entry:\n";
+        if (windowsTarget()) {
+            out << "  %error = call i32 @WSAGetLastError()\n";
+        } else if (darwinTarget()) {
+            out << "  %ptr = call ptr @__error()\n";
+            out << "  %error = load i32, ptr %ptr\n";
+        } else {
+            out << "  %ptr = call ptr @__errno_location()\n";
+            out << "  %error = load i32, ptr %ptr\n";
+        }
+        out << "  ret i32 %error\n";
+        out << "}\n\n";
+
+        const int timeout = windowsTarget() ? 10060 : (darwinTarget() ? 60 : 110);
+        const int again = windowsTarget() ? 10035 : (darwinTarget() ? 35 : 11);
+        const int refused = windowsTarget() ? 10061 : (darwinTarget() ? 61 : 111);
+        const int in_use = windowsTarget() ? 10048 : (darwinTarget() ? 48 : 98);
+        out << "define internal i32 @nus_net_reason(i32 %native) {\n";
+        out << "entry:\n";
+        out << "  %is_timeout = icmp eq i32 %native, " << timeout << "\n";
+        out << "  %is_again = icmp eq i32 %native, " << again << "\n";
+        out << "  %timeout = or i1 %is_timeout, %is_again\n";
+        out << "  %refused = icmp eq i32 %native, " << refused << "\n";
+        out << "  %in_use = icmp eq i32 %native, " << in_use << "\n";
+        out << "  %base = select i1 %in_use, i32 3, i32 0\n";
+        out << "  %with_refused = select i1 %refused, i32 2, i32 %base\n";
+        out << "  %reason = select i1 %timeout, i32 1, i32 %with_refused\n";
+        out << "  ret i32 %reason\n";
+        out << "}\n\n";
     }
 
     void emitNetworkInitHelper(std::ostringstream& out) const {
@@ -665,6 +721,7 @@ void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& poi
             break;
         }
         case TypeKind::TcpStream:
+        case TypeKind::TcpListener:
         case TypeKind::UdpSocket: {
             const std::string aggregate = next("dropsocket");
             const std::string handle64 = next("drophandle");
@@ -1238,6 +1295,23 @@ Value FunctionEmitter::emitNetworkResult(const sema::Type& result_type, bool is_
     return {type, inserted};
 }
 
+Value FunctionEmitter::emitNetworkError(int code, std::optional<int> fixed_reason) {
+    const std::string first = next("neterr");
+    out_ << "  " << first << " = insertvalue %nus.neterr zeroinitializer, i32 " << code << ", 0\n";
+    std::string reason;
+    if (fixed_reason) {
+        reason = std::to_string(*fixed_reason);
+    } else {
+        const std::string native = next("nativeerr");
+        reason = next("netreason");
+        out_ << "  " << native << " = call i32 @nus_net_last_error()\n";
+        out_ << "  " << reason << " = call i32 @nus_net_reason(i32 " << native << ")\n";
+    }
+    const std::string second = next("neterr");
+    out_ << "  " << second << " = insertvalue %nus.neterr " << first << ", i32 " << reason << ", 1\n";
+    return {"%nus.neterr", second};
+}
+
 std::string FunctionEmitter::emitSockaddrIn(const Value& address) {
     if (address.type != "%nus.socketaddr") throw std::runtime_error("LLVM codegen: expected SocketAddr");
     const std::string ip = next("sockip");
@@ -1331,6 +1405,332 @@ void FunctionEmitter::builtinNetworkErrorCode(const mir::Instruction& inst, cons
     store(*inst.destination, {"i32", code});
 }
 
+void FunctionEmitter::builtinNetworkErrorReason(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: network_error_reason expects &NetworkError");
+    const Value ref = value(arguments[0]);
+    const std::string error = next("neterr");
+    const std::string reason = next("netreason");
+    out_ << "  " << error << " = load %nus.neterr, ptr " << ref.repr << "\n";
+    out_ << "  " << reason << " = extractvalue %nus.neterr " << error << ", 1\n";
+    store(*inst.destination, {"i32", reason});
+}
+
+void FunctionEmitter::builtinDnsResolveIpv4(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: dns_resolve_ipv4 expects &string");
+    const auto& result_type = local(*inst.destination).type;
+    const Value host_ref = value(arguments[0]);
+    const std::string host_string = next("hostname");
+    const std::string host_data = next("hostdata");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << host_string << " = load %nus.string, ptr " << host_ref.repr << "\n";
+    out_ << "  " << host_data << " = extractvalue %nus.string " << host_string << ", 0\n";
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
+    const std::string resolve_label = nextLabel("dns.resolve.");
+    const std::string fail_label = nextLabel("dns.fail.");
+    const std::string ok_label = nextLabel("dns.ok.");
+    const std::string done = nextLabel("dns.done.");
+    if (module_.windowsTarget()) {
+        const std::string init = next("wsainit");
+        const std::string init_ok = next("wsaok");
+        const std::string init_fail = nextLabel("dns.init.fail.");
+        out_ << "  " << init << " = call i32 @nus_net_init()\n";
+        out_ << "  " << init_ok << " = icmp eq i32 " << init << ", 0\n";
+        out_ << "  br i1 " << init_ok << ", label %" << resolve_label << ", label %" << init_fail << "\n";
+        out_ << init_fail << ":\n";
+        const Value error = emitNetworkError(1, 0);
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
+        out_ << "  br label %" << done << "\n";
+    } else {
+        out_ << "  br label %" << resolve_label << "\n";
+    }
+    out_ << resolve_label << ":\n";
+    const std::string entry = next("hostent");
+    const std::string found = next("hostfound");
+    out_ << "  " << entry << " = call ptr @gethostbyname(ptr " << host_data << ")\n";
+    out_ << "  " << found << " = icmp ne ptr " << entry << ", null\n";
+    out_ << "  br i1 " << found << ", label %" << ok_label << ", label %" << fail_label << "\n";
+    out_ << fail_label << ":\n";
+    {
+        const Value error = emitNetworkError(9, 4);
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
+        out_ << "  br label %" << done << "\n";
+    }
+    out_ << ok_label << ":\n";
+    const std::string list_ptr = next("addrlistptr");
+    const std::string list = next("addrlist");
+    const std::string first = next("firstaddr");
+    const std::string net_ip = next("netip");
+    const std::string host_ip = next("hostip");
+    const std::string ip = next("ipaddr");
+    out_ << "  " << list_ptr << " = getelementptr inbounds %nus.hostent, ptr " << entry << ", i32 0, i32 4\n";
+    out_ << "  " << list << " = load ptr, ptr " << list_ptr << "\n";
+    out_ << "  " << first << " = load ptr, ptr " << list << "\n";
+    out_ << "  " << net_ip << " = load i32, ptr " << first << "\n";
+    out_ << "  " << host_ip << " = call i32 @ntohl(i32 " << net_ip << ")\n";
+    out_ << "  " << ip << " = insertvalue %nus.ipaddr poison, i32 " << host_ip << ", 0\n";
+    {
+        const Value result = emitNetworkResult(result_type, false, {"%nus.ipaddr", ip});
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
+        out_ << "  br label %" << done << "\n";
+    }
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinTcpListen(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 3) throw std::runtime_error("LLVM codegen: tcp_listen expects address, backlog and reuse_addr");
+    const auto& result_type = local(*inst.destination).type;
+    const Value address_ref = value(arguments[0]);
+    const Value backlog = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::I32));
+    const Value reuse = coerce(value(arguments[2]), arguments[2].type, sema::Type::simple(sema::TypeKind::Bool));
+    const std::string address = next("socketaddr");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << address << " = load %nus.socketaddr, ptr " << address_ref.repr << "\n";
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
+
+    const std::string start = nextLabel("listen.start.");
+    const std::string socket_fail = nextLabel("listen.socket.fail.");
+    const std::string have_socket = nextLabel("listen.have.socket.");
+    const std::string option_fail = nextLabel("listen.option.fail.");
+    const std::string bind_stage = nextLabel("listen.bind.");
+    const std::string bind_fail = nextLabel("listen.bind.fail.");
+    const std::string listen_stage = nextLabel("listen.listen.");
+    const std::string listen_fail = nextLabel("listen.listen.fail.");
+    const std::string success = nextLabel("listen.success.");
+    const std::string done = nextLabel("listen.done.");
+
+    if (module_.windowsTarget()) {
+        const std::string init = next("wsainit");
+        const std::string ok = next("wsaok");
+        const std::string fail = nextLabel("listen.init.fail.");
+        out_ << "  " << init << " = call i32 @nus_net_init()\n";
+        out_ << "  " << ok << " = icmp eq i32 " << init << ", 0\n";
+        out_ << "  br i1 " << ok << ", label %" << start << ", label %" << fail << "\n";
+        out_ << fail << ":\n";
+        const Value error = emitNetworkError(1, 0);
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    } else out_ << "  br label %" << start << "\n";
+
+    out_ << start << ":\n";
+    const std::string raw = next("socket");
+    std::string handle64;
+    if (module_.windowsTarget()) { out_ << "  " << raw << " = call i64 @socket(i32 2, i32 1, i32 6)\n"; handle64 = raw; }
+    else { out_ << "  " << raw << " = call i32 @socket(i32 2, i32 1, i32 6)\n"; handle64 = next("socket64"); out_ << "  " << handle64 << " = sext i32 " << raw << " to i64\n"; }
+    const std::string socket_ok = next("socketok");
+    out_ << "  " << socket_ok << " = icmp ne " << (module_.windowsTarget() ? "i64" : "i32") << ' ' << raw << ", -1\n";
+    out_ << "  br i1 " << socket_ok << ", label %" << have_socket << ", label %" << socket_fail << "\n";
+    out_ << socket_fail << ":\n";
+    {
+        const Value error = emitNetworkError(2);
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    }
+    out_ << have_socket << ":\n";
+    const std::string reuse32 = next("reuse");
+    const std::string reuse_slot = next("reuseptr");
+    const int sol_socket = (module_.windowsTarget() || module_.darwinTarget()) ? 0xffff : 1;
+    const int so_reuseaddr = (module_.windowsTarget() || module_.darwinTarget()) ? 4 : 2;
+    out_ << "  " << reuse32 << " = zext i1 " << reuse.repr << " to i32\n";
+    out_ << "  " << reuse_slot << " = alloca i32\n";
+    out_ << "  store i32 " << reuse32 << ", ptr " << reuse_slot << "\n";
+    const std::string opt_rc = next("setsockopt");
+    if (module_.windowsTarget()) out_ << "  " << opt_rc << " = call i32 @setsockopt(i64 " << raw << ", i32 " << sol_socket << ", i32 " << so_reuseaddr << ", ptr " << reuse_slot << ", i32 4)\n";
+    else out_ << "  " << opt_rc << " = call i32 @setsockopt(i32 " << raw << ", i32 " << sol_socket << ", i32 " << so_reuseaddr << ", ptr " << reuse_slot << ", i32 4)\n";
+    const std::string opt_ok = next("optionok");
+    out_ << "  " << opt_ok << " = icmp eq i32 " << opt_rc << ", 0\n";
+    out_ << "  br i1 " << opt_ok << ", label %" << bind_stage << ", label %" << option_fail << "\n";
+    out_ << option_fail << ":\n";
+    {
+        const Value error = emitNetworkError(10);
+        if (module_.windowsTarget()) out_ << "  call i32 @closesocket(i64 " << raw << ")\n"; else out_ << "  call i32 @close(i32 " << raw << ")\n";
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    }
+    out_ << bind_stage << ":\n";
+    const std::string sockaddr = emitSockaddrIn({"%nus.socketaddr", address});
+    const std::string bind_rc = next("bind");
+    if (module_.windowsTarget()) out_ << "  " << bind_rc << " = call i32 @bind(i64 " << raw << ", ptr " << sockaddr << ", i32 16)\n";
+    else out_ << "  " << bind_rc << " = call i32 @bind(i32 " << raw << ", ptr " << sockaddr << ", i32 16)\n";
+    const std::string bound = next("bound");
+    out_ << "  " << bound << " = icmp eq i32 " << bind_rc << ", 0\n";
+    out_ << "  br i1 " << bound << ", label %" << listen_stage << ", label %" << bind_fail << "\n";
+    out_ << bind_fail << ":\n";
+    {
+        const Value error = emitNetworkError(4);
+        if (module_.windowsTarget()) out_ << "  call i32 @closesocket(i64 " << raw << ")\n"; else out_ << "  call i32 @close(i32 " << raw << ")\n";
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    }
+    out_ << listen_stage << ":\n";
+    const std::string listen_rc = next("listen");
+    if (module_.windowsTarget()) out_ << "  " << listen_rc << " = call i32 @listen(i64 " << raw << ", i32 " << backlog.repr << ")\n";
+    else out_ << "  " << listen_rc << " = call i32 @listen(i32 " << raw << ", i32 " << backlog.repr << ")\n";
+    const std::string listening = next("listening");
+    out_ << "  " << listening << " = icmp eq i32 " << listen_rc << ", 0\n";
+    out_ << "  br i1 " << listening << ", label %" << success << ", label %" << listen_fail << "\n";
+    out_ << listen_fail << ":\n";
+    {
+        const Value error = emitNetworkError(7);
+        if (module_.windowsTarget()) out_ << "  call i32 @closesocket(i64 " << raw << ")\n"; else out_ << "  call i32 @close(i32 " << raw << ")\n";
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    }
+    out_ << success << ":\n";
+    const std::string listener = next("tcplistener");
+    out_ << "  " << listener << " = insertvalue %nus.tcplistener poison, i64 " << handle64 << ", 0\n";
+    {
+        const Value result = emitNetworkResult(result_type, false, {"%nus.tcplistener", listener});
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    }
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinTcpAccept(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: tcp_accept expects &mut TcpListener");
+    const auto& result_type = local(*inst.destination).type;
+    const Value listener_ref = value(arguments[0]);
+    const std::string listener = next("tcplistener");
+    out_ << "  " << listener << " = load %nus.tcplistener, ptr " << listener_ref.repr << "\n";
+    const std::string handle = socketHandleForCall({"%nus.tcplistener", listener});
+    const std::string raw = next("accepted");
+    if (module_.windowsTarget()) out_ << "  " << raw << " = call i64 @accept(i64 " << handle << ", ptr null, ptr null)\n";
+    else out_ << "  " << raw << " = call i32 @accept(i32 " << handle << ", ptr null, ptr null)\n";
+    const std::string ok = next("acceptok");
+    out_ << "  " << ok << " = icmp ne " << (module_.windowsTarget() ? "i64" : "i32") << ' ' << raw << ", -1\n";
+    const std::string ok_label = nextLabel("accept.ok.");
+    const std::string err_label = nextLabel("accept.err.");
+    const std::string done = nextLabel("accept.done.");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
+    out_ << "  br i1 " << ok << ", label %" << ok_label << ", label %" << err_label << "\n";
+    out_ << err_label << ":\n";
+    {
+        const Value error = emitNetworkError(8);
+        const Value result = emitNetworkResult(result_type, true, error);
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    }
+    out_ << ok_label << ":\n";
+    std::string handle64 = raw;
+    if (!module_.windowsTarget()) { handle64 = next("accepted64"); out_ << "  " << handle64 << " = sext i32 " << raw << " to i64\n"; }
+    const std::string stream = next("tcpstream");
+    out_ << "  " << stream << " = insertvalue %nus.tcpstream poison, i64 " << handle64 << ", 0\n";
+    {
+        const Value result = emitNetworkResult(result_type, false, {"%nus.tcpstream", stream});
+        out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    }
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinTcpSetNoDelay(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: tcp_set_nodelay expects stream and bool");
+    const auto& result_type = local(*inst.destination).type;
+    const Value stream_ref = value(arguments[0]);
+    const Value enabled = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::Bool));
+    const std::string stream = next("tcpstream");
+    out_ << "  " << stream << " = load %nus.tcpstream, ptr " << stream_ref.repr << "\n";
+    const std::string handle = socketHandleForCall({"%nus.tcpstream", stream});
+    const std::string enabled32 = next("nodelay");
+    const std::string option = next("option");
+    out_ << "  " << enabled32 << " = zext i1 " << enabled.repr << " to i32\n";
+    out_ << "  " << option << " = alloca i32\n  store i32 " << enabled32 << ", ptr " << option << "\n";
+    const std::string rc = next("setsockopt");
+    if (module_.windowsTarget()) out_ << "  " << rc << " = call i32 @setsockopt(i64 " << handle << ", i32 6, i32 1, ptr " << option << ", i32 4)\n";
+    else out_ << "  " << rc << " = call i32 @setsockopt(i32 " << handle << ", i32 6, i32 1, ptr " << option << ", i32 4)\n";
+    const std::string ok = next("optionok");
+    out_ << "  " << ok << " = icmp eq i32 " << rc << ", 0\n";
+    const std::string ok_label = nextLabel("option.ok.");
+    const std::string err_label = nextLabel("option.err.");
+    const std::string done = nextLabel("option.done.");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n  br i1 " << ok << ", label %" << ok_label << ", label %" << err_label << "\n";
+    out_ << err_label << ":\n";
+    Value result = emitNetworkResult(result_type, true, emitNetworkError(10));
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << ok_label << ":\n";
+    result = emitNetworkResult(result_type, false, {"i32", "0"});
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+void FunctionEmitter::builtinTcpSetTimeout(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: tcp_set_timeout expects stream and milliseconds");
+    const auto& result_type = local(*inst.destination).type;
+    const Value stream_ref = value(arguments[0]);
+    const Value millis = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::U32));
+    const std::string stream = next("tcpstream");
+    out_ << "  " << stream << " = load %nus.tcpstream, ptr " << stream_ref.repr << "\n";
+    const std::string handle = socketHandleForCall({"%nus.tcpstream", stream});
+    std::string option_ptr;
+    int sol_socket = (module_.windowsTarget() || module_.darwinTarget()) ? 0xffff : 1;
+    int recv_timeout = (module_.windowsTarget() || module_.darwinTarget()) ? 0x1006 : 20;
+    int send_timeout = (module_.windowsTarget() || module_.darwinTarget()) ? 0x1005 : 21;
+    int option_size = 0;
+    if (module_.windowsTarget()) {
+        option_ptr = next("timeoutptr");
+        out_ << "  " << option_ptr << " = alloca i32\n  store i32 " << millis.repr << ", ptr " << option_ptr << "\n";
+        option_size = 4;
+    } else {
+        const std::string ms64 = next("ms64");
+        const std::string sec = next("seconds");
+        const std::string rem = next("millirem");
+        const std::string usec = next("microseconds");
+        const std::string sec_ptr = next("secptr");
+        const std::string usec_ptr = next("usecptr");
+        option_ptr = next("timeoutptr");
+        out_ << "  " << ms64 << " = zext i32 " << millis.repr << " to i64\n";
+        out_ << "  " << sec << " = udiv i64 " << ms64 << ", 1000\n";
+        out_ << "  " << rem << " = urem i64 " << ms64 << ", 1000\n";
+        out_ << "  " << usec << " = mul i64 " << rem << ", 1000\n";
+        out_ << "  " << option_ptr << " = alloca %nus.timeval\n";
+        out_ << "  " << sec_ptr << " = getelementptr inbounds %nus.timeval, ptr " << option_ptr << ", i32 0, i32 0\n";
+        out_ << "  " << usec_ptr << " = getelementptr inbounds %nus.timeval, ptr " << option_ptr << ", i32 0, i32 1\n";
+        out_ << "  store i64 " << sec << ", ptr " << sec_ptr << "\n  store i64 " << usec << ", ptr " << usec_ptr << "\n";
+        option_size = 16;
+    }
+    const std::string recv_rc = next("setrecvtimeout");
+    if (module_.windowsTarget()) out_ << "  " << recv_rc << " = call i32 @setsockopt(i64 " << handle << ", i32 " << sol_socket << ", i32 " << recv_timeout << ", ptr " << option_ptr << ", i32 " << option_size << ")\n";
+    else out_ << "  " << recv_rc << " = call i32 @setsockopt(i32 " << handle << ", i32 " << sol_socket << ", i32 " << recv_timeout << ", ptr " << option_ptr << ", i32 " << option_size << ")\n";
+    const std::string recv_ok = next("timeoutok");
+    out_ << "  " << recv_ok << " = icmp eq i32 " << recv_rc << ", 0\n";
+    const std::string send_stage = nextLabel("timeout.send.");
+    const std::string err_label = nextLabel("timeout.err.");
+    const std::string ok_label = nextLabel("timeout.ok.");
+    const std::string done = nextLabel("timeout.done.");
+    const std::string result_slot = next("netresultslot");
+    out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n  br i1 " << recv_ok << ", label %" << send_stage << ", label %" << err_label << "\n";
+    out_ << send_stage << ":\n";
+    const std::string send_rc = next("setsendtimeout");
+    if (module_.windowsTarget()) out_ << "  " << send_rc << " = call i32 @setsockopt(i64 " << handle << ", i32 " << sol_socket << ", i32 " << send_timeout << ", ptr " << option_ptr << ", i32 " << option_size << ")\n";
+    else out_ << "  " << send_rc << " = call i32 @setsockopt(i32 " << handle << ", i32 " << sol_socket << ", i32 " << send_timeout << ", ptr " << option_ptr << ", i32 " << option_size << ")\n";
+    const std::string send_ok = next("timeoutok");
+    out_ << "  " << send_ok << " = icmp eq i32 " << send_rc << ", 0\n  br i1 " << send_ok << ", label %" << ok_label << ", label %" << err_label << "\n";
+    out_ << err_label << ":\n";
+    Value result = emitNetworkResult(result_type, true, emitNetworkError(10));
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << ok_label << ":\n";
+    result = emitNetworkResult(result_type, false, {"i32", "0"});
+    out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("netresult");
+    out_ << "  " << loaded << " = load " << module_.llvmType(result_type) << ", ptr " << result_slot << "\n";
+    store(*inst.destination, {module_.llvmType(result_type), loaded});
+}
+
+
 void FunctionEmitter::builtinTcpConnect(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
     if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: tcp_connect expects &SocketAddr");
     const auto& result_type = local(*inst.destination).type;
@@ -1353,9 +1753,8 @@ void FunctionEmitter::builtinTcpConnect(const mir::Instruction& inst, const std:
         out_ << "  " << init_ok << " = icmp eq i32 " << init << ", 0\n";
         out_ << "  br i1 " << init_ok << ", label %" << start_label << ", label %" << init_fail << "\n";
         out_ << init_fail << ":\n";
-        const std::string error = next("neterr");
-        out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 1, 0\n";
-        const Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+        const Value error = emitNetworkError(1, 0);
+        const Value result = emitNetworkResult(result_type, true, error);
         out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
         out_ << "  br label %" << done << "\n";
     } else {
@@ -1378,9 +1777,8 @@ void FunctionEmitter::builtinTcpConnect(const mir::Instruction& inst, const std:
     out_ << "  br i1 " << socket_ok << ", label %" << have_socket << ", label %" << socket_fail << "\n";
     out_ << socket_fail << ":\n";
     {
-        const std::string error = next("neterr");
-        out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 2, 0\n";
-        const Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+        const Value error = emitNetworkError(2);
+        const Value result = emitNetworkResult(result_type, true, error);
         out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
         out_ << "  br label %" << done << "\n";
     }
@@ -1393,12 +1791,11 @@ void FunctionEmitter::builtinTcpConnect(const mir::Instruction& inst, const std:
     out_ << "  " << connected << " = icmp eq i32 " << rc << ", 0\n";
     out_ << "  br i1 " << connected << ", label %" << success << ", label %" << connect_fail << "\n";
     out_ << connect_fail << ":\n";
-    if (module_.windowsTarget()) out_ << "  call i32 @closesocket(i64 " << raw << ")\n";
-    else out_ << "  call i32 @close(i32 " << raw << ")\n";
     {
-        const std::string error = next("neterr");
-        out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 3, 0\n";
-        const Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+        const Value error = emitNetworkError(3);
+        if (module_.windowsTarget()) out_ << "  call i32 @closesocket(i64 " << raw << ")\n";
+        else out_ << "  call i32 @close(i32 " << raw << ")\n";
+        const Value result = emitNetworkResult(result_type, true, error);
         out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
         out_ << "  br label %" << done << "\n";
     }
@@ -1437,9 +1834,8 @@ void FunctionEmitter::builtinUdpBind(const mir::Instruction& inst, const std::ve
         out_ << "  " << init_ok << " = icmp eq i32 " << init << ", 0\n";
         out_ << "  br i1 " << init_ok << ", label %" << start_label << ", label %" << init_fail << "\n";
         out_ << init_fail << ":\n";
-        const std::string error = next("neterr");
-        out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 1, 0\n";
-        const Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+        const Value error = emitNetworkError(1, 0);
+        const Value result = emitNetworkResult(result_type, true, error);
         out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
         out_ << "  br label %" << done << "\n";
     } else out_ << "  br label %" << start_label << "\n";
@@ -1454,9 +1850,8 @@ void FunctionEmitter::builtinUdpBind(const mir::Instruction& inst, const std::ve
     out_ << "  br i1 " << socket_ok << ", label %" << have_socket << ", label %" << socket_fail << "\n";
     out_ << socket_fail << ":\n";
     {
-        const std::string error = next("neterr");
-        out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 2, 0\n";
-        const Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+        const Value error = emitNetworkError(2);
+        const Value result = emitNetworkResult(result_type, true, error);
         out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
         out_ << "  br label %" << done << "\n";
     }
@@ -1469,12 +1864,11 @@ void FunctionEmitter::builtinUdpBind(const mir::Instruction& inst, const std::ve
     out_ << "  " << bound << " = icmp eq i32 " << rc << ", 0\n";
     out_ << "  br i1 " << bound << ", label %" << success << ", label %" << bind_fail << "\n";
     out_ << bind_fail << ":\n";
-    if (module_.windowsTarget()) out_ << "  call i32 @closesocket(i64 " << raw << ")\n";
-    else out_ << "  call i32 @close(i32 " << raw << ")\n";
     {
-        const std::string error = next("neterr");
-        out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 4, 0\n";
-        const Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+        const Value error = emitNetworkError(4);
+        if (module_.windowsTarget()) out_ << "  call i32 @closesocket(i64 " << raw << ")\n";
+        else out_ << "  call i32 @close(i32 " << raw << ")\n";
+        const Value result = emitNetworkResult(result_type, true, error);
         out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n";
         out_ << "  br label %" << done << "\n";
     }
@@ -1521,9 +1915,8 @@ void FunctionEmitter::builtinTcpSend(const mir::Instruction& inst, const std::ve
     out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
     out_ << "  br i1 " << failed << ", label %" << err_label << ", label %" << ok_label << "\n";
     out_ << err_label << ":\n";
-    const std::string error = next("neterr");
-    out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 5, 0\n";
-    Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+    const Value error = emitNetworkError(5);
+    Value result = emitNetworkResult(result_type, true, error);
     out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
     out_ << ok_label << ":\n";
     std::string count = rc;
@@ -1569,9 +1962,8 @@ void FunctionEmitter::builtinUdpSendTo(const mir::Instruction& inst, const std::
     out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
     out_ << "  br i1 " << failed << ", label %" << err_label << ", label %" << ok_label << "\n";
     out_ << err_label << ":\n";
-    const std::string error = next("neterr");
-    out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 5, 0\n";
-    Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+    const Value error = emitNetworkError(5);
+    Value result = emitNetworkResult(result_type, true, error);
     out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
     out_ << ok_label << ":\n";
     std::string count = rc;
@@ -1609,10 +2001,9 @@ void FunctionEmitter::builtinTcpReceive(const mir::Instruction& inst, const std:
     out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
     out_ << "  br i1 " << failed << ", label %" << err_label << ", label %" << ok_label << "\n";
     out_ << err_label << ":\n";
+    const Value error = emitNetworkError(6);
     out_ << "  call void @free(ptr " << data << ")\n";
-    const std::string error = next("neterr");
-    out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 6, 0\n";
-    Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+    Value result = emitNetworkResult(result_type, true, error);
     out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
     out_ << ok_label << ":\n";
     std::string count = rc;
@@ -1657,10 +2048,9 @@ void FunctionEmitter::builtinUdpReceive(const mir::Instruction& inst, const std:
     out_ << "  " << result_slot << " = alloca " << module_.llvmType(result_type) << "\n";
     out_ << "  br i1 " << failed << ", label %" << err_label << ", label %" << ok_label << "\n";
     out_ << err_label << ":\n";
+    const Value error = emitNetworkError(6);
     out_ << "  call void @free(ptr " << data << ")\n";
-    const std::string error = next("neterr");
-    out_ << "  " << error << " = insertvalue %nus.neterr poison, i32 6, 0\n";
-    Value result = emitNetworkResult(result_type, true, {"%nus.neterr", error});
+    Value result = emitNetworkResult(result_type, true, error);
     out_ << "  store " << result.type << ' ' << result.repr << ", ptr " << result_slot << "\n  br label %" << done << "\n";
     out_ << ok_label << ":\n";
     std::string count = rc;
@@ -1788,7 +2178,13 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (callee.text == "socket_addr") { builtinSocketAddr(inst, arguments); return; }
             if (callee.text == "socket_port") { builtinSocketPort(inst, arguments); return; }
             if (callee.text == "network_error_code") { builtinNetworkErrorCode(inst, arguments); return; }
+            if (callee.text == "network_error_reason") { builtinNetworkErrorReason(inst, arguments); return; }
+            if (callee.text == "dns_resolve_ipv4") { builtinDnsResolveIpv4(inst, arguments); return; }
             if (callee.text == "tcp_connect") { builtinTcpConnect(inst, arguments); return; }
+            if (callee.text == "tcp_listen") { builtinTcpListen(inst, arguments); return; }
+            if (callee.text == "tcp_accept") { builtinTcpAccept(inst, arguments); return; }
+            if (callee.text == "tcp_set_nodelay") { builtinTcpSetNoDelay(inst, arguments); return; }
+            if (callee.text == "tcp_set_timeout") { builtinTcpSetTimeout(inst, arguments); return; }
             if (callee.text == "tcp_send") { builtinTcpSend(inst, arguments); return; }
             if (callee.text == "tcp_receive") { builtinTcpReceive(inst, arguments); return; }
             if (callee.text == "udp_bind") { builtinUdpBind(inst, arguments); return; }
