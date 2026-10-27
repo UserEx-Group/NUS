@@ -253,6 +253,10 @@ NativeBuildResult NativeToolchain::build(const std::string& llvm_ir,
     args.push_back("--gcc-toolchain=" + mingw);
 #endif
     args.insert(args.end(), {"-Wno-override-module", "-O0", "-x", "ir", ir_path.string(), "-o", output.string()});
+#ifdef _WIN32
+    // Winsock is part of the native NUS networking runtime on Windows/MinGW-w64.
+    args.push_back("-lws2_32");
+#endif
 
     result.command = displayCommand(args);
     result.exit_code = runProcess(args);
