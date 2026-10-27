@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.12.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.13.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -104,3 +104,19 @@ add_test(NAME enums COMMAND nus_enum_tests)
 add_executable(nus_enum_native_tests tests/EnumNativeTests.cpp)
 target_link_libraries(nus_enum_native_tests PRIVATE nus_frontend)
 add_test(NAME enum_native COMMAND nus_enum_native_tests)
+
+add_executable(nus_trait_tests tests/TraitTests.cpp)
+target_link_libraries(nus_trait_tests PRIVATE nus_frontend)
+add_test(NAME traits COMMAND nus_trait_tests)
+
+add_executable(nus_trait_native_tests tests/TraitNativeTests.cpp)
+target_link_libraries(nus_trait_native_tests PRIVATE nus_frontend)
+add_test(NAME trait_native COMMAND nus_trait_native_tests)
+
+add_executable(nus_iterator_tests tests/IteratorTests.cpp)
+target_link_libraries(nus_iterator_tests PRIVATE nus_frontend)
+add_test(NAME iterators COMMAND nus_iterator_tests)
+
+add_executable(nus_iterator_native_tests tests/IteratorNativeTests.cpp)
+target_link_libraries(nus_iterator_native_tests PRIVATE nus_frontend)
+add_test(NAME iterator_native COMMAND nus_iterator_native_tests)
