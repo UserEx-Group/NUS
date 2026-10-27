@@ -47,6 +47,10 @@ std::string structSymbol(std::string_view name) {
     return "%nus.struct." + sanitize(name);
 }
 
+std::string enumSymbol(std::string_view name) {
+    return "%nus.enum." + sanitize(name);
+}
+
 std::string removeUnderscores(std::string text) {
     text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
     return text;
@@ -207,7 +211,7 @@ public:
 
     std::string run() {
         std::ostringstream out;
-        out << "; NUS LLVM IR - milestone 11\n";
+        out << "; NUS LLVM IR - milestone 12\n";
         out << "; target: " << target_.description() << "\n";
         if (!target_.triple.empty()) out << "target triple = \"" << target_.triple << "\"\n";
         out << "\n";
@@ -258,6 +262,7 @@ public:
             case TypeKind::TypeParameter:
                 throw std::runtime_error("LLVM codegen: unmonomorphized type parameter `" + type.name() + "`");
             case TypeKind::Struct: return structSymbol(type.nominal_name);
+            case TypeKind::Enum: return enumSymbol(type.nominal_name);
             case TypeKind::Array:
                 if (!type.element || !type.array_length) throw std::runtime_error("LLVM codegen: unsized array is not supported");
                 return "[" + std::to_string(*type.array_length) + " x " + llvmType(*type.element) + "]";
@@ -287,6 +292,27 @@ public:
             if (definition.fields[i].name == field) return i;
         }
         throw std::runtime_error("LLVM codegen: struct `" + std::string(structure_name) + "` has no field `" + std::string(field) + "`");
+    }
+    [[nodiscard]] const mir::Enum& enumeration(std::string_view name) const {
+        for (const auto& enumeration : program_.enums) if (enumeration.name == name) return enumeration;
+        throw std::runtime_error("LLVM codegen: unknown enum `" + std::string(name) + "`");
+    }
+    [[nodiscard]] const mir::EnumVariant& enumVariant(std::string_view enum_name, std::string_view variant) const {
+        const auto& definition = enumeration(enum_name);
+        for (const auto& candidate : definition.variants) if (candidate.name == variant) return candidate;
+        throw std::runtime_error("LLVM codegen: enum `" + std::string(enum_name) + "` has no variant `" + std::string(variant) + "`");
+    }
+    [[nodiscard]] std::size_t enumPayloadFieldIndex(std::string_view enum_name, std::string_view variant, std::size_t payload_index) const {
+        const auto& definition = enumeration(enum_name);
+        std::size_t field = 1;
+        for (const auto& candidate : definition.variants) {
+            if (candidate.name == variant) {
+                if (payload_index >= candidate.payloads.size()) throw std::runtime_error("LLVM codegen: invalid enum payload index");
+                return field + payload_index;
+            }
+            field += candidate.payloads.size();
+        }
+        throw std::runtime_error("LLVM codegen: enum variant not found");
     }
     [[nodiscard]] std::string symbol(std::string_view name) const { return functionSymbol(name); }
     [[nodiscard]] std::pair<std::string, std::size_t> stringGlobal(std::string_view literal) const {
@@ -327,6 +353,13 @@ private:
             for (std::size_t i = 0; i < structure.fields.size(); ++i) {
                 if (i != 0) out << ", ";
                 out << llvmType(structure.fields[i].type);
+            }
+            out << " }\n";
+        }
+        for (const auto& enumeration : program_.enums) {
+            out << enumSymbol(enumeration.name) << " = type { i32";
+            for (const auto& variant : enumeration.variants) {
+                for (const auto& payload : variant.payloads) out << ", " << llvmType(payload);
             }
             out << " }\n";
         }
@@ -586,6 +619,90 @@ void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& poi
                 out_ << done << ":\n";
             }
             out_ << "  call void @free(ptr " << data << ")\n";
+            break;
+        }
+        case TypeKind::Option: {
+            if (!type.element || type.element->isCopy() || type.element->isReference()) break;
+            const std::string aggregate = next("dropopt");
+            const std::string tag = next("droptag");
+            const std::string some_label = nextLabel("drop.option.some.");
+            const std::string end_label = nextLabel("drop.option.end.");
+            out_ << "  " << aggregate << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
+            out_ << "  " << tag << " = extractvalue " << module_.llvmType(type) << ' ' << aggregate << ", 0\n";
+            out_ << "  br i1 " << tag << ", label %" << some_label << ", label %" << end_label << "\n";
+            out_ << some_label << ":\n";
+            const std::string payload_ptr = next("droppayload");
+            out_ << "  " << payload_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer << ", i32 0, i32 1\n";
+            emitDestroy(*type.element, payload_ptr);
+            out_ << "  br label %" << end_label << "\n";
+            out_ << end_label << ":\n";
+            break;
+        }
+        case TypeKind::Result: {
+            if (type.generic_arguments.size() != 2) break;
+            const auto& ok_type = type.generic_arguments[0];
+            const auto& err_type = type.generic_arguments[1];
+            if ((ok_type.isCopy() || ok_type.isReference()) && (err_type.isCopy() || err_type.isReference())) break;
+            const std::string aggregate = next("dropres");
+            const std::string tag = next("droptag");
+            const std::string err_label = nextLabel("drop.result.err.");
+            const std::string ok_label = nextLabel("drop.result.ok.");
+            const std::string end_label = nextLabel("drop.result.end.");
+            out_ << "  " << aggregate << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
+            out_ << "  " << tag << " = extractvalue " << module_.llvmType(type) << ' ' << aggregate << ", 0\n";
+            out_ << "  br i1 " << tag << ", label %" << err_label << ", label %" << ok_label << "\n";
+            out_ << ok_label << ":\n";
+            if (!ok_type.isCopy() && !ok_type.isReference()) {
+                const std::string payload_ptr = next("dropok");
+                out_ << "  " << payload_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer << ", i32 0, i32 1\n";
+                emitDestroy(ok_type, payload_ptr);
+            }
+            out_ << "  br label %" << end_label << "\n";
+            out_ << err_label << ":\n";
+            if (!err_type.isCopy() && !err_type.isReference()) {
+                const std::string payload_ptr = next("droperr");
+                out_ << "  " << payload_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer << ", i32 0, i32 2\n";
+                emitDestroy(err_type, payload_ptr);
+            }
+            out_ << "  br label %" << end_label << "\n";
+            out_ << end_label << ":\n";
+            break;
+        }
+        case TypeKind::Enum: {
+            const auto& enumeration = module_.enumeration(type.nominal_name);
+            bool needs_drop = false;
+            for (const auto& variant : enumeration.variants) {
+                for (const auto& payload : variant.payloads) {
+                    if (!payload.isCopy() && !payload.isReference()) needs_drop = true;
+                }
+            }
+            if (!needs_drop) break;
+            const std::string aggregate = next("dropenum");
+            const std::string tag = next("droptag");
+            const std::string end_label = nextLabel("drop.enum.end.");
+            out_ << "  " << aggregate << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
+            out_ << "  " << tag << " = extractvalue " << module_.llvmType(type) << ' ' << aggregate << ", 0\n";
+            for (std::size_t vi = 0; vi < enumeration.variants.size(); ++vi) {
+                const auto& variant = enumeration.variants[vi];
+                const std::string case_label = nextLabel("drop.enum.case.");
+                const std::string next_label = vi + 1 == enumeration.variants.size() ? end_label : nextLabel("drop.enum.next.");
+                const std::string condition = next("dropcase");
+                out_ << "  " << condition << " = icmp eq i32 " << tag << ", " << variant.tag << "\n";
+                out_ << "  br i1 " << condition << ", label %" << case_label << ", label %" << next_label << "\n";
+                out_ << case_label << ":\n";
+                for (std::size_t pi = 0; pi < variant.payloads.size(); ++pi) {
+                    const auto& payload = variant.payloads[pi];
+                    if (payload.isCopy() || payload.isReference()) continue;
+                    const auto field = module_.enumPayloadFieldIndex(type.nominal_name, variant.name, pi);
+                    const std::string payload_ptr = next("droppayload");
+                    out_ << "  " << payload_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer
+                         << ", i32 0, i32 " << field << "\n";
+                    emitDestroy(payload, payload_ptr);
+                }
+                out_ << "  br label %" << end_label << "\n";
+                if (next_label != end_label) out_ << next_label << ":\n";
+            }
+            out_ << end_label << ":\n";
             break;
         }
         case TypeKind::Struct: {
@@ -1007,7 +1124,34 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (callee.text == "vec_get_i32" || callee.text.rfind("__builtin_vec_get$", 0) == 0) { builtinVecGet(inst, arguments); return; }
             if (callee.text.rfind("__builtin_some$", 0) == 0 || callee.text.rfind("__builtin_none$", 0) == 0 ||
                 callee.text.rfind("__builtin_ok$", 0) == 0 || callee.text.rfind("__builtin_err$", 0) == 0) {
-                throw std::runtime_error("LLVM codegen: Option/Result constructors are semantic-only in milestone 11");
+                if (!inst.destination) throw std::runtime_error("LLVM codegen: tagged constructor requires destination");
+                const auto& destination = local(*inst.destination);
+                const std::string aggregate_type = module_.llvmType(destination.type);
+                std::string aggregate = "zeroinitializer";
+                const bool some = callee.text.rfind("__builtin_some$", 0) == 0;
+                const bool none = callee.text.rfind("__builtin_none$", 0) == 0;
+                const bool err = callee.text.rfind("__builtin_err$", 0) == 0;
+                const bool tag = some || err;
+                const std::string tagged = next("tagged");
+                out_ << "  " << tagged << " = insertvalue " << aggregate_type << ' ' << aggregate << ", i1 " << (tag ? "1" : "0") << ", 0\n";
+                aggregate = tagged;
+                if (!none && !arguments.empty()) {
+                    std::size_t field = 1;
+                    sema::Type expected = arguments.front().type;
+                    if (destination.type.kind == sema::TypeKind::Option && destination.type.element) expected = *destination.type.element;
+                    if (destination.type.kind == sema::TypeKind::Result && destination.type.generic_arguments.size() == 2) {
+                        expected = err ? destination.type.generic_arguments[1] : destination.type.generic_arguments[0];
+                        field = err ? 2 : 1;
+                    }
+                    const Value payload = coerce(value(arguments.front()), arguments.front().type, expected);
+                    const std::string inserted = next("payload");
+                    out_ << "  " << inserted << " = insertvalue " << aggregate_type << ' ' << aggregate << ", "
+                         << payload.type << ' ' << payload.repr << ", " << field << "\n";
+                    aggregate = inserted;
+                    if (!arguments.front().type.isCopy() && !arguments.front().type.isReference()) markMoved(arguments.front());
+                }
+                store(*inst.destination, {aggregate_type, aggregate});
+                return;
             }
             std::vector<Value> values;
             values.reserve(arguments.size());
@@ -1041,6 +1185,81 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                     if (!callee.type.parameters[i].isReference() && !arguments[i].type.isCopy()) markMoved(arguments[i]);
                 }
             }
+            break;
+        }
+        case InstructionKind::MakeVariant: {
+            if (!inst.destination) return;
+            const auto& destination = local(*inst.destination);
+            const std::string type = module_.llvmType(destination.type);
+            std::string variant = inst.name;
+            const auto sep = variant.rfind("::");
+            if (sep != std::string::npos) variant = variant.substr(sep + 2);
+            std::string aggregate = "zeroinitializer";
+            std::size_t tag = 0;
+            std::vector<std::size_t> fields;
+            std::vector<sema::Type> payload_types;
+            if (destination.type.kind == sema::TypeKind::Option && destination.type.element) {
+                tag = variant == "Some" ? 1U : 0U;
+                if (variant == "Some") { fields = {1}; payload_types = {*destination.type.element}; }
+            } else if (destination.type.kind == sema::TypeKind::Result && destination.type.generic_arguments.size() == 2) {
+                tag = variant == "Err" ? 1U : 0U;
+                if (variant == "Err") { fields = {2}; payload_types = {destination.type.generic_arguments[1]}; }
+                else { fields = {1}; payload_types = {destination.type.generic_arguments[0]}; }
+            } else if (destination.type.kind == sema::TypeKind::Enum) {
+                const auto& v = module_.enumVariant(destination.type.nominal_name, variant);
+                tag = v.tag;
+                payload_types = v.payloads;
+                for (std::size_t i = 0; i < v.payloads.size(); ++i) fields.push_back(module_.enumPayloadFieldIndex(destination.type.nominal_name, variant, i));
+            } else {
+                throw std::runtime_error("LLVM codegen: MakeVariant destination is not an enum-like type");
+            }
+            const std::string tagged = next("variant");
+            const std::string tag_type = destination.type.kind == sema::TypeKind::Enum ? "i32" : "i1";
+            out_ << "  " << tagged << " = insertvalue " << type << ' ' << aggregate << ", " << tag_type << ' ' << tag << ", 0\n";
+            aggregate = tagged;
+            for (std::size_t i = 0; i < inst.operands.size() && i < fields.size(); ++i) {
+                const Value payload = coerce(value(inst.operands[i]), inst.operands[i].type, payload_types[i]);
+                const std::string inserted = next("variant");
+                out_ << "  " << inserted << " = insertvalue " << type << ' ' << aggregate << ", "
+                     << payload.type << ' ' << payload.repr << ", " << fields[i] << "\n";
+                aggregate = inserted;
+            }
+            store(*inst.destination, {type, aggregate});
+            for (const auto& operand : inst.operands) if (!operand.type.isCopy() && !operand.type.isReference()) markMoved(operand);
+            break;
+        }
+        case InstructionKind::GetDiscriminant: {
+            if (!inst.destination || inst.operands.empty()) return;
+            const auto source = value(inst.operands.front());
+            const bool user_enum = inst.operands.front().type.kind == sema::TypeKind::Enum;
+            const std::string raw = next("tag");
+            out_ << "  " << raw << " = extractvalue " << source.type << ' ' << source.repr << ", 0\n";
+            if (user_enum) store(*inst.destination, {"i32", raw});
+            else {
+                const std::string extended = next("tag32");
+                out_ << "  " << extended << " = zext i1 " << raw << " to i32\n";
+                store(*inst.destination, {"i32", extended});
+            }
+            break;
+        }
+        case InstructionKind::GetVariantField: {
+            if (!inst.destination || inst.operands.size() < 2) return;
+            const auto& source_operand = inst.operands.front();
+            const Value source = value(source_operand);
+            const std::size_t payload_index = static_cast<std::size_t>(std::stoull(inst.operands[1].text));
+            std::size_t field = 1;
+            if (source_operand.type.kind == sema::TypeKind::Option) field = 1;
+            else if (source_operand.type.kind == sema::TypeKind::Result) field = inst.name == "Err" ? 2 : 1;
+            else if (source_operand.type.kind == sema::TypeKind::Enum) field = module_.enumPayloadFieldIndex(source_operand.type.nominal_name, inst.name, payload_index);
+            else throw std::runtime_error("LLVM codegen: variant field source is not enum-like");
+            const std::string extracted = next("payload");
+            const auto& destination = local(*inst.destination);
+            out_ << "  " << extracted << " = extractvalue " << source.type << ' ' << source.repr << ", " << field << "\n";
+            store(*inst.destination, {module_.llvmType(destination.type), extracted});
+            break;
+        }
+        case InstructionKind::Consume: {
+            if (!inst.operands.empty()) markMoved(inst.operands.front());
             break;
         }
         case InstructionKind::Member: {
