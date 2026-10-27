@@ -19,6 +19,13 @@ Type Type::structure(std::string name) {
     return type;
 }
 
+Type Type::enumeration(std::string name) {
+    Type type;
+    type.kind = TypeKind::Enum;
+    type.nominal_name = std::move(name);
+    return type;
+}
+
 Type Type::array(Type element_type, std::optional<std::size_t> length) {
     Type type;
     type.kind = TypeKind::Array;
@@ -143,6 +150,10 @@ bool Type::isStruct() const noexcept {
     return kind == TypeKind::Struct;
 }
 
+bool Type::isEnum() const noexcept {
+    return kind == TypeKind::Enum;
+}
+
 bool Type::isReference() const noexcept {
     return kind == TypeKind::Reference;
 }
@@ -185,6 +196,7 @@ bool Type::isCopy() const noexcept {
         case TypeKind::Bytes:
         case TypeKind::Vec:
         case TypeKind::Struct:
+        case TypeKind::Enum:
             return false;
     }
     return false;
@@ -237,6 +249,7 @@ std::string Type::name() const {
                    (generic_arguments.size() > 1 ? generic_arguments[1].name() : std::string("<unknown>")) + ">";
         case TypeKind::TypeParameter: return nominal_name.empty() ? "<type parameter>" : nominal_name;
         case TypeKind::Struct: return nominal_name.empty() ? "<anonymous struct>" : nominal_name;
+        case TypeKind::Enum: return nominal_name.empty() ? "<anonymous enum>" : nominal_name;
         case TypeKind::Array: {
             const std::string element_name = element ? element->name() : "<unknown>";
             if (array_length) return "[" + element_name + "; " + std::to_string(*array_length) + "]";
@@ -272,6 +285,7 @@ bool operator==(const Type& lhs, const Type& rhs) {
 
     switch (lhs.kind) {
         case TypeKind::Struct:
+        case TypeKind::Enum:
             return lhs.nominal_name == rhs.nominal_name;
         case TypeKind::Array:
             if (lhs.array_length != rhs.array_length) return false;

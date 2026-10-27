@@ -32,6 +32,7 @@ enum class TypeKind {
     Result,
     TypeParameter,
     Struct,
+    Enum,
     Array,
     Slice,
     Range,
@@ -53,6 +54,7 @@ struct Type {
 
     [[nodiscard]] static Type simple(TypeKind kind);
     [[nodiscard]] static Type structure(std::string name);
+    [[nodiscard]] static Type enumeration(std::string name);
     [[nodiscard]] static Type array(Type element, std::optional<std::size_t> length = std::nullopt);
     [[nodiscard]] static Type slice(Type element);
     [[nodiscard]] static Type range(Type element);
@@ -71,6 +73,7 @@ struct Type {
     [[nodiscard]] bool isBool() const noexcept;
     [[nodiscard]] bool isUnit() const noexcept;
     [[nodiscard]] bool isStruct() const noexcept;
+    [[nodiscard]] bool isEnum() const noexcept;
     [[nodiscard]] bool isReference() const noexcept;
     [[nodiscard]] bool isCopy() const noexcept;
     [[nodiscard]] bool containsReference() const noexcept;
