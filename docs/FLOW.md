@@ -98,3 +98,9 @@ Loop dataflow now initializes unvisited non-entry block states at the lattice bo
 `VecIter<T>` drop glue is progress-aware. Because the iterator stores its current index, an early exit destroys only the elements not yet yielded and then frees the backing allocation.
 
 Milestone 14 removes the `T: Copy` restriction for consuming iteration. Each non-Copy loop binding receives conditional per-iteration cleanup, including `break`/`continue` paths, while `VecIter<T>` owns only the not-yet-yielded suffix. Borrowing `.iter()` and `.iter_mut()` are represented by three-word borrow-carrying iterators and participate in the same liveness-derived NLL analysis.
+
+## Milestone 17 resource pins
+
+Reactor registrations introduce an internal third lifetime relation in addition to shared and mutable loans: a **resource pin**. A pin is carried by the Reactor and rooted at the registered socket owner. It prevents moves, reassignment and drop of that owner while the relevant Reactor remains live, but does not conflict with normal shared or mutable borrows used for socket I/O.
+
+Pins are activated only after the registration call's program point and participate in forward CFG dataflow. Moving a Reactor propagates its pins to the new Reactor owner. M17 requires the owners behind registration references to be locally traceable; interprocedural registration effects are deferred.

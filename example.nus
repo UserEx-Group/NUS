@@ -99,6 +99,25 @@ fn configure_native(stream: &mut TcpStream) -> Result<i32, NetworkError> {
     ok::<i32, NetworkError>(0)
 }
 
+
+async fn plus_one(value: i32) -> i32 {
+    value + 1
+}
+
+async fn async_demo() -> i32 {
+    let first = await plus_one(40);
+    await plus_one(first)
+}
+
+fn reactor_probe(address: &SocketAddr) -> Result<usize, NetworkError> {
+    let mut listener = tcp_listen(address, 8, true)?;
+    let _nonblocking = tcp_listener_set_nonblocking(&mut listener, true)?;
+    let mut reactor = reactor_new()?;
+    let _registered = reactor_register_listener(&mut reactor, &listener, 1usize)?;
+    let _ready = reactor_wait(&mut reactor, 0)?;
+    ok::<usize, NetworkError>(reactor_len(&reactor))
+}
+
 fn route_port(okay: bool) -> Result<i32, string> {
     let message = "route offline";
     let result = if okay {
@@ -175,6 +194,8 @@ fn main() {
         Ok(value) => print(value),
         Err(_) => print("route-error"),
     }
+
+    print(block_on(async_demo()));
 
     packet.consume();
 }

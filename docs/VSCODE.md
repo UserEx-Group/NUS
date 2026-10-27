@@ -1,4 +1,4 @@
-# VS Code Language Support — Milestone 16.5
+# VS Code Language Support — Milestone 16.5 / updated for M17
 
 The official bootstrap editor integration lives in `editors/vscode`.
 

@@ -122,3 +122,21 @@ The generated backend materializes a platform `sockaddr_in` only at the system-c
 ## Milestone 16 networking ABI
 
 `NetworkError` is now `{ i32 operation, i32 reason }` (8 bytes, align 4). `TcpListener` is one normalized 64-bit native handle, matching `TcpStream`/`UdpSocket` ownership layout.
+
+## Milestone 17 Future and Reactor ABI
+
+The eager bootstrap future uses a ready flag plus payload:
+
+```text
+Future<T> { bool ready, T value }
+```
+
+`Future<unit>` stores only the ready flag. Payload alignment determines aggregate padding; on x86-64 `Future<i32>` is 8 bytes aligned to 4.
+
+`Reactor` uses three machine words:
+
+```text
+Reactor { ptr entries, usize len, usize cap }
+```
+
+On x86-64 it is 24 bytes aligned to 8. Individual registration records are NUS-owned and are translated to platform `pollfd`/`WSAPOLLFD` arrays only for `reactor_wait`.

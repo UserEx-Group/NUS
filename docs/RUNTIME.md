@@ -87,3 +87,9 @@ Network receive buffers are ordinary owned `Vec<u8>` allocations and therefore r
 ## Milestone 16 socket resources
 
 `TcpListener` joins `TcpStream` and `UdpSocket` as an owned runtime resource. Drop glue closes only the live owner. DNS results and `NetworkError` are value types and do not allocate.
+
+## Milestone 17 Future and Reactor resources
+
+`Future<T>` is currently an eager ready-value container. A non-Copy payload remains owned by the Future until `await`/`block_on` transfers it or drop glue destroys it.
+
+`Reactor` owns its dynamically allocated registration array and frees that storage on drop. It does not own registered sockets; MIR resource pins ensure those socket owners cannot move or drop while a live Reactor can still reference their native handles.

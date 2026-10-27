@@ -176,3 +176,9 @@ The Windows native toolchain adds `-lws2_32` automatically. The supported Window
 ## Milestone 16 networking lowering
 
 The backend now lowers `gethostbyname`/`ntohl`, `listen`, `accept` and `setsockopt` in addition to the M15 socket calls. Common `errno`/Winsock failures are mapped internally to portable NUS network-reason codes. Windows GNU targets continue to link `ws2_32`.
+
+## Milestone 17 async/reactor lowering
+
+`async fn` returns an explicit `Future<T>` at HIR/MIR/LLVM boundaries. `future.ready` wraps a completed return payload, while MIR `await` asserts the eager-ready flag and transfers the payload out with normal move/drop semantics. `block_on` is the synchronous extraction bridge. `?` early returns inside async functions are wrapped in the function's Future before the MIR return terminator.
+
+The reactor backend emits a NUS-owned registration array and helper lowering for `poll` on POSIX or `WSAPoll` on Windows. Non-blocking mode uses `fcntl(F_GETFL/F_SETFL, O_NONBLOCK)` on POSIX and `ioctlsocket(FIONBIO)` on Windows. The Reactor does not expose native `pollfd` layouts in the NUS ABI.

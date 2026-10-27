@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 16 — TCP Servers, DNS & Socket Options
+## Milestone 17 — Native Reactor + Async Foundations
 
-NUS now has an owned synchronous IPv4 networking layer for clients and servers on POSIX and Windows/MinGW-w64. Milestone 16 adds `TcpListener`, `accept`, native DNS resolution, portable error reasons, `TCP_NODELAY` and read/write timeouts on top of the M15 TCP/UDP foundation.
+Milestone 17 adds non-blocking socket mode, a real cross-platform readiness reactor (`poll` on POSIX, `WSAPoll` on Windows), resource-pin lifetime safety, and the first explicit `Future<T>` / `async fn` / `await` pipeline. Async functions are eager/ready in this milestone; true suspension and executor scheduling remain a later step. The VS Code extension from Milestone 16.5 remains bundled and now highlights the M17 runtime/types while retaining VS Code 1.32+ compatibility.
 
 ```text
 .nus
@@ -33,6 +33,12 @@ clang + native GNU toolchain
  ↓
 native executable
 ```
+
+## VS Code extension
+
+Milestone 16.5 adds a dependency-free VS Code extension under `editors/vscode`. It registers `.nus`, provides TextMate syntax highlighting, NUS snippets, language configuration, and commands that invoke the real `nusc` for `--check` and `--build`. Compiler diagnostics are surfaced as editor diagnostics instead of being reimplemented in JavaScript.
+
+Open `editors/vscode` in VS Code and press `F5` to launch an Extension Development Host. See `docs/VSCODE.md` for setup, compiler discovery and packaging.
 
 ## Build the compiler
 
@@ -261,6 +267,25 @@ fn receive(stream: &mut TcpStream) -> Result<Vec<u8>, NetworkError> {
 
 `TcpStream`, `TcpListener` and `UdpSocket` are non-`Copy`; their native handle is closed by drop glue. Windows lowering uses Winsock and links `ws2_32` automatically while retaining the LLVM + MinGW-w64 toolchain. See `docs/NETWORKING.md`.
 
+## Async and reactor foundations
+
+```nus
+async fn plus_one(value: i32) -> i32 {
+    value + 1
+}
+
+async fn compute() -> i32 {
+    let value = await plus_one(41);
+    value
+}
+
+fn main() {
+    print(block_on(compute()));
+}
+```
+
+M17 `Future<T>` values are eager/ready: `async fn` already has explicit type/IR lowering and ownership-aware `await`, but does not suspend yet. Separately, `Reactor` performs real OS readiness polling and supports non-blocking `TcpStream`, `TcpListener` and `UdpSocket` registrations. Registration creates an internal resource pin that keeps the OS handle owner alive without blocking normal mutable I/O. See `docs/ASYNC_REACTOR.md`.
+
 ## Compiler modes
 
 ```text
@@ -276,7 +301,7 @@ fn receive(stream: &mut TcpStream) -> Result<Vec<u8>, NetworkError> {
 
 ## Tests
 
-Milestone 16 contains twenty-eight suites:
+Milestone 17 contains thirty-two suites:
 
 ```text
 lexer
@@ -307,14 +332,18 @@ network
 network_native
 network_services
 network_services_native
+async
+async_native
+reactor
+reactor_native
 ```
 
 The native suites now also resolve `localhost`, create and drop a real loopback TCP listener on an ephemeral port, and compile the `accept`, `setsockopt`, DNS and richer error paths through LLVM and the host linker.
 
 ## Current boundaries
 
-Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs, optimized vector growth, IPv6, multi-address DNS results, peer/local endpoint queries, UDP sender metadata, non-blocking sockets, async I/O, polling/reactors and TLS.
+Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs, optimized vector growth, IPv6, multi-address DNS results, peer/local endpoint queries, UDP sender metadata, deregistration, true suspended async state machines/executor scheduling, async methods and TLS.
 
 See [`docs/NETWORKING.md`](docs/NETWORKING.md), [`docs/TRAITS_ITERATORS.md`](docs/TRAITS_ITERATORS.md), [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
 
-For lifetime rules see `docs/LIFETIMES.md`; for the Milestone 16 socket ABI and APIs see `docs/NETWORKING.md`.
+For lifetime rules see `docs/LIFETIMES.md`; for sockets see `docs/NETWORKING.md`; for M17 async/reactor semantics see `docs/ASYNC_REACTOR.md`.

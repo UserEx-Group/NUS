@@ -173,3 +173,11 @@ Windows GNU lowering uses Winsock equivalents plus `WSAStartup`, `WSAGetLastErro
 ## Current boundaries
 
 Milestone 16 is still synchronous and IPv4-only. The DNS bootstrap returns only the first IPv4 result and uses the legacy host resolver; a future resolver layer will move to a richer address-list API. Also deferred are IPv6, peer/local endpoint queries, UDP sender metadata, half-close/shutdown, non-blocking mode, polling/reactors, async/await networking, TLS and higher-level protocols.
+
+## Milestone 17 non-blocking mode and reactor
+
+Sockets can now opt into non-blocking mode with `tcp_set_nonblocking`, `tcp_listener_set_nonblocking` and `udp_set_nonblocking`. POSIX uses `fcntl`/`O_NONBLOCK`; Windows uses `ioctlsocket(FIONBIO)`.
+
+`Reactor` is an owned runtime value that stores registrations and waits for readiness with `poll()` on POSIX or `WSAPoll()` on Windows. `reactor_register_tcp`, `reactor_register_listener` and `reactor_register_udp` attach a user token and desired read/write interests; `reactor_wait` fills readiness flags queried through the `reactor_event_*` functions.
+
+A registered resource is protected by an internal NLL resource pin. The pin prevents move/drop of the socket owner while the Reactor can reference its OS handle but intentionally allows `&mut` I/O after readiness. Reactor/poll failures use network operation code `11`.
