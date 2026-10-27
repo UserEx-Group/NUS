@@ -1,0 +1,100 @@
+{
+  "name": "nus-language-support",
+  "displayName": "NUS Language Support",
+  "description": "Language support for NUS — Network Universal Syntax.",
+  "version": "0.16.5",
+  "publisher": "userex",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "nus",
+    "network universal syntax",
+    "systems programming",
+    "networking"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:nus",
+    "onCommand:nus.checkCurrentFile",
+    "onCommand:nus.buildCurrentFile",
+    "onCommand:nus.showCompilerOutput"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "nus",
+        "aliases": ["NUS", "nus", "Network Universal Syntax"],
+        "extensions": [".nus"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nus",
+        "scopeName": "source.nus",
+        "path": "./syntaxes/nus.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "nus",
+        "path": "./snippets/nus.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "nus.checkCurrentFile",
+        "title": "NUS: Check Current File",
+        "category": "NUS"
+      },
+      {
+        "command": "nus.buildCurrentFile",
+        "title": "NUS: Build Current File",
+        "category": "NUS"
+      },
+      {
+        "command": "nus.showCompilerOutput",
+        "title": "NUS: Show Compiler Output",
+        "category": "NUS"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "nus.checkCurrentFile",
+          "when": "editorLangId == nus",
+          "group": "navigation@90"
+        },
+        {
+          "command": "nus.buildCurrentFile",
+          "when": "editorLangId == nus",
+          "group": "navigation@91"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "NUS",
+      "properties": {
+        "nus.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to nusc. When empty, the extension checks NUSC, workspace build/nusc(.exe), then PATH."
+        },
+        "nus.revealCompilerOutput": {
+          "type": "string",
+          "enum": ["never", "onError", "always"],
+          "default": "onError",
+          "description": "When to reveal the NUS compiler output channel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "validate": "node ./scripts/validate.js",
+    "check-js": "node --check ./extension.js"
+  }
+}

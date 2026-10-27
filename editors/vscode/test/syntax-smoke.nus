@@ -1,0 +1,39 @@
+// NUS syntax smoke file for TextMate highlighting.
+trait Transport {
+    type Output;
+    fn send(&mut self, packet: &Vec<u8>) -> Result<Self::Output, NetworkError>;
+}
+
+struct Packet {
+    source: u32,
+    payload: Vec<u8>,
+}
+
+enum State {
+    Ready(i32),
+    Closed,
+}
+
+fn connect(address: &SocketAddr) -> Result<TcpStream, NetworkError> {
+    let mut stream = tcp_connect(address)?;
+    let _ = tcp_set_nodelay(&mut stream, true)?;
+    ok::<TcpStream, NetworkError>(stream)
+}
+
+fn main() {
+    let address = socket_addr(ipv4(127, 0, 0, 1), 8080u16);
+    let mut values: Vec<i32> = vec_new::<i32>();
+    values.push(0x2A);
+
+    for value in values.iter_mut() {
+        *value += 1;
+    }
+
+    let state = State::Ready(43);
+    let code = match state {
+        State::Ready(value) => value,
+        State::Closed => 0,
+    };
+
+    print(socket_port(&address), code, r#"raw string"#);
+}

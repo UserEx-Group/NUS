@@ -1,0 +1,133 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2}) -> ${3:unit} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Declare a NUS function"
+  },
+  "Main function": {
+    "prefix": "main",
+    "body": [
+      "fn main() {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "NUS program entry point"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "    ${2:field}: ${3:i32},",
+      "}"
+    ],
+    "description": "Declare a struct"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "    ${2:Variant},",
+      "    ${3:Payload}(${4:i32}),",
+      "}"
+    ],
+    "description": "Declare an enum"
+  },
+  "Trait": {
+    "prefix": "trait",
+    "body": [
+      "trait ${1:TraitName} {",
+      "    type ${2:Item};",
+      "    fn ${3:method}(&self) -> Self::${2:Item};",
+      "}"
+    ],
+    "description": "Declare a trait with an associated type"
+  },
+  "Implementation": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Type} {",
+      "    fn ${2:method}(&self) -> ${3:unit} {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Declare an implementation block"
+  },
+  "Trait implementation": {
+    "prefix": "impltrait",
+    "body": [
+      "impl ${1:Trait} for ${2:Type} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Implement a trait for a type"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "    ${2:Variant} => ${3:value},",
+      "    _ => ${0:fallback},",
+      "}"
+    ],
+    "description": "Exhaustive match expression"
+  },
+  "Result function": {
+    "prefix": "resultfn",
+    "body": [
+      "fn ${1:name}(${2}) -> Result<${3:i32}, ${4:NetworkError}> {",
+      "    let value = ${5:operation}()?;",
+      "    ok::<${3:i32}, ${4:NetworkError}>(${6:value})",
+      "}"
+    ],
+    "description": "Function returning Result with ? propagation"
+  },
+  "Vector": {
+    "prefix": "vec",
+    "body": [
+      "let mut ${1:values}: Vec<${2:i32}> = vec_new::<${2:i32}>();",
+      "${1:values}.push(${0});"
+    ],
+    "description": "Create a Vec<T>"
+  },
+  "Borrowed for loop": {
+    "prefix": "foriter",
+    "body": [
+      "for ${1:item} in ${2:values}.iter() {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Iterate over shared references"
+  },
+  "TCP connect": {
+    "prefix": "tcpconnect",
+    "body": [
+      "let ${1:address} = socket_addr(ipv4(${2:127}, ${3:0}, ${4:0}, ${5:1}), ${6:8080});",
+      "let ${7:stream} = tcp_connect(&${1:address})?;"
+    ],
+    "description": "Connect a native TCP stream"
+  },
+  "TCP listener": {
+    "prefix": "tcplisten",
+    "body": [
+      "let ${1:address} = socket_addr(ipv4(${2:127}, ${3:0}, ${4:0}, ${5:1}), ${6:8080});",
+      "let mut ${7:listener} = tcp_listen(&${1:address}, ${8:128}, true)?;",
+      "let mut ${9:stream} = tcp_accept(&mut ${7:listener})?;",
+      "${0}"
+    ],
+    "description": "Create a TCP listener and accept a connection"
+  },
+  "UDP bind": {
+    "prefix": "udpbind",
+    "body": [
+      "let ${1:address} = socket_addr(ipv4(${2:127}, ${3:0}, ${4:0}, ${5:1}), ${6:0});",
+      "let mut ${7:socket} = udp_bind(&${1:address})?;",
+      "${0}"
+    ],
+    "description": "Bind a UDP socket"
+  }
+}
