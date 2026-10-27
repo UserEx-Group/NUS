@@ -41,16 +41,21 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::I32:
         case TypeKind::U32:
         case TypeKind::F32:
-        case TypeKind::Char: return {4, 4};
+        case TypeKind::Char:
+        case TypeKind::IpAddr:
+        case TypeKind::NetworkError: return {4, 4};
         case TypeKind::I64:
         case TypeKind::U64:
         case TypeKind::F64: return {8, 8};
         case TypeKind::ISize:
         case TypeKind::USize:
         case TypeKind::Reference:
-        case TypeKind::Function: return {pointer, pointer};
+        case TypeKind::Function:
+        case TypeKind::TcpStream:
+        case TypeKind::UdpSocket: return {pointer, pointer};
         case TypeKind::String:
         case TypeKind::Vec: return {pointer * 3U, pointer};
+        case TypeKind::SocketAddr: return {8, 4};
         case TypeKind::VecIter: return {pointer * 4U, pointer};
         case TypeKind::VecRefIter:
         case TypeKind::VecMutIter: return {pointer * 3U, pointer};

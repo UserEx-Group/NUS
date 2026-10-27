@@ -26,6 +26,11 @@ sema::Type primitiveType(std::string_view name) {
     if (name == "char") return Type::simple(TypeKind::Char);
     if (name == "string") return Type::simple(TypeKind::String);
     if (name == "bytes") return Type::simple(TypeKind::Bytes);
+    if (name == "IpAddr") return Type::simple(TypeKind::IpAddr);
+    if (name == "SocketAddr") return Type::simple(TypeKind::SocketAddr);
+    if (name == "NetworkError") return Type::simple(TypeKind::NetworkError);
+    if (name == "TcpStream") return Type::simple(TypeKind::TcpStream);
+    if (name == "UdpSocket") return Type::simple(TypeKind::UdpSocket);
     return Type::simple(TypeKind::Unknown);
 }
 

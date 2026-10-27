@@ -192,6 +192,9 @@ bool Type::isCopy() const noexcept {
         case TypeKind::F64:
         case TypeKind::Char:
         case TypeKind::Slice:
+        case TypeKind::IpAddr:
+        case TypeKind::SocketAddr:
+        case TypeKind::NetworkError:
         case TypeKind::Function:
             return true;
         case TypeKind::Reference:
@@ -212,6 +215,8 @@ bool Type::isCopy() const noexcept {
         case TypeKind::VecIter:
         case TypeKind::VecRefIter:
         case TypeKind::VecMutIter:
+        case TypeKind::TcpStream:
+        case TypeKind::UdpSocket:
         case TypeKind::Struct:
         case TypeKind::Enum:
             return false;
@@ -262,6 +267,11 @@ std::string Type::name() const {
         case TypeKind::Char: return "char";
         case TypeKind::String: return "string";
         case TypeKind::Bytes: return "bytes";
+        case TypeKind::IpAddr: return "IpAddr";
+        case TypeKind::SocketAddr: return "SocketAddr";
+        case TypeKind::NetworkError: return "NetworkError";
+        case TypeKind::TcpStream: return "TcpStream";
+        case TypeKind::UdpSocket: return "UdpSocket";
         case TypeKind::Vec:
             return "Vec<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::VecIter:

@@ -35,6 +35,11 @@ std::optional<TypeKind> simpleTypeKind(std::string_view name) {
     if (name == "char") return TypeKind::Char;
     if (name == "string") return TypeKind::String;
     if (name == "bytes") return TypeKind::Bytes;
+    if (name == "IpAddr") return TypeKind::IpAddr;
+    if (name == "SocketAddr") return TypeKind::SocketAddr;
+    if (name == "NetworkError") return TypeKind::NetworkError;
+    if (name == "TcpStream") return TypeKind::TcpStream;
+    if (name == "UdpSocket") return TypeKind::UdpSocket;
     return std::nullopt;
 }
 
@@ -245,6 +250,14 @@ void SemanticAnalyzer::registerBuiltins() {
     const Type string_type = Type::simple(TypeKind::String);
     const Type usize_type = Type::simple(TypeKind::USize);
     const Type i32_type = Type::simple(TypeKind::I32);
+    const Type u8_type = Type::simple(TypeKind::U8);
+    const Type u16_type = Type::simple(TypeKind::U16);
+    const Type ip_type = Type::simple(TypeKind::IpAddr);
+    const Type socket_addr_type = Type::simple(TypeKind::SocketAddr);
+    const Type network_error_type = Type::simple(TypeKind::NetworkError);
+    const Type tcp_stream_type = Type::simple(TypeKind::TcpStream);
+    const Type udp_socket_type = Type::simple(TypeKind::UdpSocket);
+    const Type bytes_buffer_type = Type::vector(u8_type);
     const Type vec_i32 = Type::vector(i32_type);
 
     auto builtin = [&](std::string name, std::vector<Type> parameters, Type result) {
@@ -258,6 +271,18 @@ void SemanticAnalyzer::registerBuiltins() {
 
     builtin("string_clone", {Type::reference(string_type)}, string_type);
     builtin("string_len", {Type::reference(string_type)}, usize_type);
+
+    // Native networking foundation. Network payloads are owned Vec<u8> buffers.
+    builtin("ipv4", {u8_type, u8_type, u8_type, u8_type}, ip_type);
+    builtin("socket_addr", {ip_type, u16_type}, socket_addr_type);
+    builtin("socket_port", {Type::reference(socket_addr_type)}, u16_type);
+    builtin("network_error_code", {Type::reference(network_error_type)}, i32_type);
+    builtin("tcp_connect", {Type::reference(socket_addr_type)}, Type::result(tcp_stream_type, network_error_type));
+    builtin("tcp_send", {Type::reference(tcp_stream_type, true), Type::reference(bytes_buffer_type)}, Type::result(usize_type, network_error_type));
+    builtin("tcp_receive", {Type::reference(tcp_stream_type, true), usize_type}, Type::result(bytes_buffer_type, network_error_type));
+    builtin("udp_bind", {Type::reference(socket_addr_type)}, Type::result(udp_socket_type, network_error_type));
+    builtin("udp_send_to", {Type::reference(udp_socket_type, true), Type::reference(socket_addr_type), Type::reference(bytes_buffer_type)}, Type::result(usize_type, network_error_type));
+    builtin("udp_receive", {Type::reference(udp_socket_type, true), usize_type}, Type::result(bytes_buffer_type, network_error_type));
     // Compatibility shims from milestone 10. New code should use the generic builtins below.
     builtin("vec_new_i32", {}, vec_i32);
     builtin("vec_push_i32", {Type::reference(vec_i32, true), i32_type}, unitType());
