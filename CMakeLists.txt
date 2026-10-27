@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.11.1 LANGUAGES CXX)
+project(nus_lang VERSION 0.12.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -96,3 +96,11 @@ add_test(NAME generics COMMAND nus_generic_tests)
 add_executable(nus_generic_native_tests tests/GenericNativeTests.cpp)
 target_link_libraries(nus_generic_native_tests PRIVATE nus_frontend)
 add_test(NAME generic_native COMMAND nus_generic_native_tests)
+
+add_executable(nus_enum_tests tests/EnumTests.cpp)
+target_link_libraries(nus_enum_tests PRIVATE nus_frontend)
+add_test(NAME enums COMMAND nus_enum_tests)
+
+add_executable(nus_enum_native_tests tests/EnumNativeTests.cpp)
+target_link_libraries(nus_enum_native_tests PRIVATE nus_frontend)
+add_test(NAME enum_native COMMAND nus_enum_native_tests)
