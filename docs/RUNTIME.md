@@ -83,3 +83,7 @@ Milestone 15 adds two OS-backed owning resources: `TcpStream` and `UdpSocket`. B
 Networking errors are currently stable NUS error codes rather than raw platform error numbers. This keeps `Result<_, NetworkError>` portable between POSIX and Winsock while the error model is still bootstrap-level.
 
 Network receive buffers are ordinary owned `Vec<u8>` allocations and therefore reuse the vector allocator/drop path rather than introducing a second buffer allocator.
+
+## Milestone 16 socket resources
+
+`TcpListener` joins `TcpStream` and `UdpSocket` as an owned runtime resource. Drop glue closes only the live owner. DNS results and `NetworkError` are value types and do not allocate.

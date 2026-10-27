@@ -172,3 +172,7 @@ The LLVM backend lowers the networking builtins directly to the host socket ABI.
 The Windows native toolchain adds `-lws2_32` automatically. The supported Windows ABI remains `x86_64-w64-windows-gnu`; no MSVC runtime/toolset is introduced.
 
 `Vec<u8>` is the wire-buffer representation. Receive operations allocate a vector backing store with `malloc`, set length to the number of bytes returned by the OS, and transfer that allocation into `Result<Vec<u8>, NetworkError>`. Existing Result/drop lowering therefore owns all cleanup paths.
+
+## Milestone 16 networking lowering
+
+The backend now lowers `gethostbyname`/`ntohl`, `listen`, `accept` and `setsockopt` in addition to the M15 socket calls. Common `errno`/Winsock failures are mapped internally to portable NUS network-reason codes. Windows GNU targets continue to link `ws2_32`.

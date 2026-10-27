@@ -118,3 +118,7 @@ UdpSocket    { i64 native_handle }                 size 8, align 8
 The generated backend materializes a platform `sockaddr_in` only at the system-call boundary and applies `htonl` / `htons` there. POSIX file descriptors are extended into the 64-bit NUS handle field; Windows `SOCKET` values already fit the field on x86-64.
 
 `TcpStream` and `UdpSocket` are non-`Copy` and participate in recursive drop glue. Their active owner closes the handle with `close` on POSIX or `closesocket` on Windows.
+
+## Milestone 16 networking ABI
+
+`NetworkError` is now `{ i32 operation, i32 reason }` (8 bytes, align 4). `TcpListener` is one normalized 64-bit native handle, matching `TcpStream`/`UdpSocket` ownership layout.

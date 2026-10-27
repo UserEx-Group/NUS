@@ -81,6 +81,24 @@ fn bind_native(address: &SocketAddr) -> Result<UdpSocket, NetworkError> {
     udp_bind(address)
 }
 
+fn resolve_native(host: &string) -> Result<IpAddr, NetworkError> {
+    dns_resolve_ipv4(host)
+}
+
+fn listen_native(address: &SocketAddr) -> Result<TcpListener, NetworkError> {
+    tcp_listen(address, 64, true)
+}
+
+fn accept_native(listener: &mut TcpListener) -> Result<TcpStream, NetworkError> {
+    tcp_accept(listener)
+}
+
+fn configure_native(stream: &mut TcpStream) -> Result<i32, NetworkError> {
+    let _nodelay = tcp_set_nodelay(stream, true)?;
+    let _timeout = tcp_set_timeout(stream, 1000u32)?;
+    ok::<i32, NetworkError>(0)
+}
+
 fn route_port(okay: bool) -> Result<i32, string> {
     let message = "route offline";
     let result = if okay {

@@ -1,185 +1,175 @@
-# NUS Native Networking — Milestone 15
+# NUS Native Networking — Milestone 16
 
-Milestone 15 introduces the first native networking layer in NUS. The API is intentionally small and synchronous; its purpose is to establish safe ownership, ABI and error semantics before asynchronous I/O and higher-level protocols are added.
+Milestone 16 extends the synchronous native networking layer with TCP servers, IPv4 DNS resolution, portable error reasons and basic socket configuration. The implementation remains ownership-aware, IPv4-first and MSVC-free on Windows.
 
-## Built-in types
+## Built-in networking types
 
 ```nus
 IpAddr
 SocketAddr
 NetworkError
 TcpStream
+TcpListener
 UdpSocket
 ```
 
-`IpAddr`, `SocketAddr` and `NetworkError` are `Copy`. `TcpStream` and `UdpSocket` are owning, non-`Copy` resources. Moving either socket transfers the operating-system handle. Dropping the final owner closes it.
+`IpAddr`, `SocketAddr` and `NetworkError` are `Copy`. `TcpStream`, `TcpListener` and `UdpSocket` own operating-system handles and are non-`Copy`; moving them transfers ownership and dropping the final owner closes the handle.
 
 On 64-bit targets the bootstrap ABI is:
 
 ```text
 IpAddr       size 4  align 4
 SocketAddr   size 8  align 4
-NetworkError size 4  align 4
+NetworkError size 8  align 4
 TcpStream    size 8  align 8
+TcpListener  size 8  align 8
 UdpSocket    size 8  align 8
 ```
 
-The language representation is independent of the platform's `SOCKET`/file-descriptor width. Native handles are normalized to a 64-bit field in the NUS ABI and converted at the OS boundary.
+## DNS
 
-## Addresses
-
-IPv4 is the only address family in this milestone:
+The first resolver is deliberately IPv4-only and returns the first address reported by the host resolver:
 
 ```nus
-let ip = ipv4(127, 0, 0, 1);
-let address = socket_addr(ip, 8080);
-print(socket_port(&address));
+fn resolve(host: &string) -> Result<IpAddr, NetworkError> {
+    dns_resolve_ipv4(host)
+}
 ```
 
-`IpAddr` stores the IPv4 value in host order. `SocketAddr` stores the port in host order. `htonl`/`htons` are applied only when an OS `sockaddr_in` is constructed.
+The bootstrap backend uses the native host resolver (`gethostbyname`) so DNS works without a NUS runtime daemon or external dependency. The public result stays a portable `IpAddr`; platform-specific resolver structures never enter the language ABI.
 
-IPv6, DNS resolution and hostname types are deferred.
+## TCP clients
 
-## TCP
+Milestone 15 client APIs remain available:
 
 ```nus
 fn connect(address: &SocketAddr) -> Result<TcpStream, NetworkError> {
     tcp_connect(address)
 }
-```
 
-The stream is an owned resource and composes with `?`:
-
-```nus
-fn connect_forward(address: &SocketAddr) -> Result<TcpStream, NetworkError> {
-    let stream = tcp_connect(address)?;
-    ok::<TcpStream, NetworkError>(stream)
-}
-```
-
-Binary payloads use `Vec<u8>`:
-
-```nus
-fn transmit(
-    stream: &mut TcpStream,
-    buffer: &Vec<u8>
-) -> Result<usize, NetworkError> {
-    tcp_send(stream, buffer)
+fn transmit(stream: &mut TcpStream, data: &Vec<u8>) -> Result<usize, NetworkError> {
+    tcp_send(stream, data)
 }
 
-fn receive(
-    stream: &mut TcpStream
-) -> Result<Vec<u8>, NetworkError> {
+fn receive(stream: &mut TcpStream) -> Result<Vec<u8>, NetworkError> {
     tcp_receive(stream, 4096)
 }
 ```
 
-`tcp_send` reports the number of bytes actually accepted by the OS; partial sends are therefore visible to user code. `tcp_receive` allocates an owned `Vec<u8>` with capacity equal to the requested maximum and length equal to the number of bytes received. A zero-length receive represents EOF, not an error.
+A zero-length receive is EOF rather than an error.
+
+## TCP listeners and accept
+
+A listener is created with an address, backlog and `SO_REUSEADDR` policy:
+
+```nus
+fn serve(address: &SocketAddr) -> Result<TcpListener, NetworkError> {
+    tcp_listen(address, 128, true)
+}
+```
+
+The lowering sequence is:
+
+```text
+socket
+  ↓
+setsockopt(SO_REUSEADDR)
+  ↓
+bind
+  ↓
+listen
+  ↓
+TcpListener owner
+```
+
+Accepting a client requires exclusive access to the listener:
+
+```nus
+fn accept_one(listener: &mut TcpListener) -> Result<TcpStream, NetworkError> {
+    tcp_accept(listener)
+}
+```
+
+The accepted stream is a new owned `TcpStream`. The listener remains alive and can accept additional connections.
+
+## Socket options
+
+TCP streams can configure Nagle behavior:
+
+```nus
+let _ = tcp_set_nodelay(&mut stream, true)?;
+```
+
+and combined read/write timeout in milliseconds:
+
+```nus
+let _ = tcp_set_timeout(&mut stream, 1500u32)?;
+```
+
+The bootstrap functions return `Result<i32, NetworkError>` with `0` as the success payload. This is temporary until `Result<unit, E>` has a dedicated native representation.
+
+`tcp_set_timeout` maps milliseconds to the platform ABI: Winsock receives a millisecond integer; POSIX receives a `timeval` and configures both `SO_RCVTIMEO` and `SO_SNDTIMEO`.
 
 ## UDP
 
-A socket is created and bound with:
+The M15 UDP API remains unchanged:
 
 ```nus
-let local = socket_addr(ipv4(127, 0, 0, 1), 0);
-let socket = udp_bind(&local);
+udp_bind(&local)
+udp_send_to(&mut socket, &remote, &bytes)
+udp_receive(&mut socket, 2048)
 ```
 
-Port `0` delegates ephemeral-port selection to the OS.
+Payloads remain `Vec<u8>` rather than `string` so binary protocols preserve arbitrary bytes and embedded zeroes.
 
-Datagrams use the same binary buffer type:
+## Portable NetworkError
 
-```nus
-fn transmit(
-    socket: &mut UdpSocket,
-    remote: &SocketAddr,
-    packet: &Vec<u8>
-) -> Result<usize, NetworkError> {
-    udp_send_to(socket, remote, packet)
-}
-
-fn receive(
-    socket: &mut UdpSocket
-) -> Result<Vec<u8>, NetworkError> {
-    udp_receive(socket, 2048)
-}
-```
-
-The bootstrap `udp_receive` discards sender-address metadata. A future `recv_from` API will return both payload and peer address.
-
-## Stable NUS error codes
-
-`NetworkError` currently wraps a small NUS-defined code rather than exposing platform-specific `errno` or Winsock values:
+`NetworkError` is now two 32-bit fields internally:
 
 ```text
-1  networking runtime initialization failed
-2  socket creation failed
-3  TCP connect failed
-4  bind failed
-5  send/sendto failed
-6  receive failed
+{ operation_code, reason_code }
 ```
 
-The code can be inspected with:
+The operation code identifies which NUS networking operation failed:
+
+```text
+1   networking runtime initialization
+2   socket creation
+3   connect
+4   bind
+5   send/sendto
+6   receive
+7   listen
+8   accept
+9   DNS resolution
+10  socket option
+```
+
+The reason code is portable across POSIX and Winsock:
+
+```text
+0  unknown / uncategorized
+1  timeout / would-block timeout
+2  connection refused
+3  address already in use
+4  host not found
+```
+
+Inspect them with:
 
 ```nus
 network_error_code(&error)
+network_error_reason(&error)
 ```
 
-This keeps programs portable between POSIX and Winsock. Rich error variants and optional native error details are deferred.
+NUS reads `errno` or `WSAGetLastError` internally only long enough to map common failures. Native OS error numbers are not exposed in the language ABI, so code does not need platform-specific constants.
 
-## Resource safety
+## Windows and POSIX lowering
 
-`TcpStream` and `UdpSocket` are non-`Copy`:
+POSIX lowering uses libc socket APIs including `socket`, `bind`, `listen`, `accept`, `setsockopt`, `connect`, `send`, `sendto`, `recv`, `close`, `gethostbyname`, `htonl`, `htons` and `ntohl`.
 
-```text
-socket owner
-   │ move
-   ▼
-new owner
-```
-
-Drop glue closes only the live owner. Sockets inside `Result`, enums, structs, vectors or other owned aggregates are recursively closed through the existing drop system.
-
-On POSIX, drop calls `close`. On Windows/MinGW-w64, it calls `closesocket`.
-
-## Platform lowering
-
-POSIX targets lower to:
-
-```text
-socket
-connect
-bind
-send
-sendto
-recv
-close
-htonl
-htons
-```
-
-Windows GNU targets lower to Winsock:
-
-```text
-WSAStartup
-socket
-connect
-bind
-send
-sendto
-recv
-closesocket
-htonl
-htons
-```
-
-`NativeToolchain` automatically links `ws2_32` for Windows targets. NUS remains MSVC-free; the supported Windows path is LLVM/Clang + MinGW-w64.
-
-Winsock initialization is process-scoped and performed lazily once by the generated `nus_net_init` helper.
+Windows GNU lowering uses Winsock equivalents plus `WSAStartup`, `WSAGetLastError` and `closesocket`. `NativeToolchain` automatically links `ws2_32`; the supported Windows path remains LLVM/Clang + MinGW-w64 with no MSVC dependency.
 
 ## Current boundaries
 
-Milestone 15 is synchronous and IPv4-only. Deferred work includes IPv6, DNS, `TcpListener`, accept, socket options, timeouts, non-blocking mode, peer/local address queries, UDP sender metadata, async I/O, polling/reactors, TLS, higher-level protocols and richer OS error information.
-
-These are intentionally deferred until the resource and error semantics introduced here have been proven stable.
+Milestone 16 is still synchronous and IPv4-only. The DNS bootstrap returns only the first IPv4 result and uses the legacy host resolver; a future resolver layer will move to a richer address-list API. Also deferred are IPv6, peer/local endpoint queries, UDP sender metadata, half-close/shutdown, non-blocking mode, polling/reactors, async/await networking, TLS and higher-level protocols.

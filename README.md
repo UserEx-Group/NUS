@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 15 — Native Networking Foundation
+## Milestone 16 — TCP Servers, DNS & Socket Options
 
-NUS now has an owned native socket layer for IPv4 TCP/UDP on POSIX and Windows/MinGW-w64. Networking composes with the existing `Result`, `?`, ownership, NLL and drop systems; payloads are binary `Vec<u8>` buffers rather than text strings.
+NUS now has an owned synchronous IPv4 networking layer for clients and servers on POSIX and Windows/MinGW-w64. Milestone 16 adds `TcpListener`, `accept`, native DNS resolution, portable error reasons, `TCP_NODELAY` and read/write timeouts on top of the M15 TCP/UDP foundation.
 
 ```text
 .nus
@@ -259,7 +259,7 @@ fn receive(stream: &mut TcpStream) -> Result<Vec<u8>, NetworkError> {
 }
 ```
 
-`TcpStream` and `UdpSocket` are non-`Copy`; their native handle is closed by drop glue. Windows lowering uses Winsock and links `ws2_32` automatically while retaining the LLVM + MinGW-w64 toolchain. See `docs/NETWORKING.md`.
+`TcpStream`, `TcpListener` and `UdpSocket` are non-`Copy`; their native handle is closed by drop glue. Windows lowering uses Winsock and links `ws2_32` automatically while retaining the LLVM + MinGW-w64 toolchain. See `docs/NETWORKING.md`.
 
 ## Compiler modes
 
@@ -276,7 +276,7 @@ fn receive(stream: &mut TcpStream) -> Result<Vec<u8>, NetworkError> {
 
 ## Tests
 
-Milestone 15 contains twenty-six suites:
+Milestone 16 contains twenty-eight suites:
 
 ```text
 lexer
@@ -305,14 +305,16 @@ borrowed_iterators
 borrowed_iterator_native
 network
 network_native
+network_services
+network_services_native
 ```
 
-The native suites now also cover IPv4 address lowering, UDP socket creation/bind/drop, TCP/UDP symbol lowering, `TcpStream` ownership through `Result`/`?`, and platform networking runtime linkage.
+The native suites now also resolve `localhost`, create and drop a real loopback TCP listener on an ephemeral port, and compile the `accept`, `setsockopt`, DNS and richer error paths through LLVM and the host linker.
 
 ## Current boundaries
 
-Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs, optimized vector growth, IPv6, DNS, listeners/accept, non-blocking sockets, async I/O and richer native networking errors.
+Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs, optimized vector growth, IPv6, multi-address DNS results, peer/local endpoint queries, UDP sender metadata, non-blocking sockets, async I/O, polling/reactors and TLS.
 
 See [`docs/NETWORKING.md`](docs/NETWORKING.md), [`docs/TRAITS_ITERATORS.md`](docs/TRAITS_ITERATORS.md), [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
 
-For lifetime rules see `docs/LIFETIMES.md`; for the Milestone 15 socket ABI and APIs see `docs/NETWORKING.md`.
+For lifetime rules see `docs/LIFETIMES.md`; for the Milestone 16 socket ABI and APIs see `docs/NETWORKING.md`.
