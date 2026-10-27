@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 14 — Lifetimes, Borrowed Iterators & Non-Copy Iteration
+## Milestone 15 — Native Networking Foundation
 
-NUS now propagates borrow provenance across calls, supports safe elided reference returns, exposes shared/mutable borrowed vector iterators, and can consume non-`Copy` vector elements with per-iteration drop accounting.
+NUS now has an owned native socket layer for IPv4 TCP/UDP on POSIX and Windows/MinGW-w64. Networking composes with the existing `Result`, `?`, ownership, NLL and drop systems; payloads are binary `Vec<u8>` buffers rather than text strings.
 
 ```text
 .nus
@@ -207,7 +207,7 @@ At the call site, the returned reference carries the original loan. NLL allows t
 Milestone 12 functionality remains native:
 
 ```nus
-enum NetworkError {
+enum AppError {
     Timeout,
     Refused,
 }
@@ -227,6 +227,40 @@ fn connect(okay: bool) -> Result<i32, string> {
 
 `match` is exhaustive and `?` lowers to explicit success/error CFG with ownership transfer on the early-return path.
 
+
+## Native networking
+
+Milestone 15 reserves five built-in networking types:
+
+```nus
+IpAddr
+SocketAddr
+NetworkError
+TcpStream
+UdpSocket
+```
+
+Addresses are constructed explicitly:
+
+```nus
+let local = socket_addr(ipv4(127, 0, 0, 1), 8080);
+print(socket_port(&local));
+```
+
+TCP/UDP use binary `Vec<u8>` payloads and `Result`:
+
+```nus
+fn connect(address: &SocketAddr) -> Result<TcpStream, NetworkError> {
+    tcp_connect(address)
+}
+
+fn receive(stream: &mut TcpStream) -> Result<Vec<u8>, NetworkError> {
+    tcp_receive(stream, 4096)
+}
+```
+
+`TcpStream` and `UdpSocket` are non-`Copy`; their native handle is closed by drop glue. Windows lowering uses Winsock and links `ws2_32` automatically while retaining the LLVM + MinGW-w64 toolchain. See `docs/NETWORKING.md`.
+
 ## Compiler modes
 
 ```text
@@ -242,7 +276,7 @@ fn connect(okay: bool) -> Result<i32, string> {
 
 ## Tests
 
-Milestone 14 contains twenty-four suites:
+Milestone 15 contains twenty-six suites:
 
 ```text
 lexer
@@ -269,14 +303,16 @@ lifetimes
 lifetime_native
 borrowed_iterators
 borrowed_iterator_native
+network
+network_native
 ```
 
-The native suites now cover concrete trait methods/associated types, generic impl specialization, owned and borrowed vector iteration, interprocedural reference-return provenance, mutable dereference stores, non-`Copy` loop yields, and native ownership/drop behavior.
+The native suites now also cover IPv4 address lowering, UDP socket creation/bind/drop, TCP/UDP symbol lowering, `TcpStream` ownership through `Result`/`?`, and platform networking runtime linkage.
 
 ## Current boundaries
 
-Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs and optimized vector growth.
+Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs, optimized vector growth, IPv6, DNS, listeners/accept, non-blocking sockets, async I/O and richer native networking errors.
 
-See [`docs/TRAITS_ITERATORS.md`](docs/TRAITS_ITERATORS.md), [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
+See [`docs/NETWORKING.md`](docs/NETWORKING.md), [`docs/TRAITS_ITERATORS.md`](docs/TRAITS_ITERATORS.md), [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
 
-For the exact Milestone 14 lifetime rules and current boundaries, see `docs/LIFETIMES.md`.
+For lifetime rules see `docs/LIFETIMES.md`; for the Milestone 15 socket ABI and APIs see `docs/NETWORKING.md`.

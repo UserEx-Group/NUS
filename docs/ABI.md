@@ -102,3 +102,19 @@ VecRefIter<T> / VecMutIter<T> {
 ```
 
 On a 64-bit target each is 24 bytes with 8-byte alignment. Their distinction is semantic: `VecRefIter<T>` carries a shared loan and yields `&T`; `VecMutIter<T>` carries an exclusive loan and yields `&mut T`. Dropping either iterator releases only the MIR loan; it never frees `data`.
+
+## Milestone 15 networking ABI
+
+Native networking uses target-stable NUS wrapper values rather than exposing platform socket structs directly:
+
+```text
+IpAddr       { u32 host_order_ipv4 }              size 4, align 4
+SocketAddr   { IpAddr ip, u16 host_order_port }    size 8, align 4
+NetworkError { i32 code }                          size 4, align 4
+TcpStream    { i64 native_handle }                 size 8, align 8
+UdpSocket    { i64 native_handle }                 size 8, align 8
+```
+
+The generated backend materializes a platform `sockaddr_in` only at the system-call boundary and applies `htonl` / `htons` there. POSIX file descriptors are extended into the 64-bit NUS handle field; Windows `SOCKET` values already fit the field on x86-64.
+
+`TcpStream` and `UdpSocket` are non-`Copy` and participate in recursive drop glue. Their active owner closes the handle with `close` on POSIX or `closesocket` on Windows.

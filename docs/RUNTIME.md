@@ -75,3 +75,11 @@ The generic vector runtime can now be reached through instance syntax: `push`, `
 `Vec<T>::iter()` and `iter_mut()` now create borrowed runtime iterators with `{ data, len, index }`. They carry shared or exclusive MIR loan provenance respectively but do not own or free the backing allocation. NLL releases that loan after the iterator/result's last use.
 
 Owned iteration can now move non-`Copy` elements out one at a time. Each yielded loop binding has conditional cleanup, while `VecIter<T>` destroys only elements at its current index and beyond when dropped. This divides ownership cleanly between already-yielded bindings and the still-owned iterator suffix.
+
+## Native socket resources
+
+Milestone 15 adds two OS-backed owning resources: `TcpStream` and `UdpSocket`. Both use the compiler's normal move/drop flags. Moving a socket clears the source drop flag; destroying the live owner closes the native handle exactly once.
+
+Networking errors are currently stable NUS error codes rather than raw platform error numbers. This keeps `Result<_, NetworkError>` portable between POSIX and Winsock while the error model is still bootstrap-level.
+
+Network receive buffers are ordinary owned `Vec<u8>` allocations and therefore reuse the vector allocator/drop path rather than introducing a second buffer allocator.

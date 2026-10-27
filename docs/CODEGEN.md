@@ -164,3 +164,11 @@ Borrowed vector iterators now lower natively. `VecRefIter<T>` and `VecMutIter<T>
 Reference-return calls also carry their originating loan through MIR. The current source-level lifetime model uses conservative elision: a free function returning a reference must have one unambiguous borrowed input, while a borrowed method receiver is the preferred origin.
 
 Consuming `VecIter<T>` no longer requires `T: Copy`. Non-Copy loop bindings receive conditional per-iteration drop cleanup, and the iterator owns only the still-unconsumed suffix. Mutable dereference assignment lowers to `store.deref`, enabling code such as `*item += 1` inside `iter_mut()` loops.
+
+## Milestone 15 native networking lowering
+
+The LLVM backend lowers the networking builtins directly to the host socket ABI. POSIX targets declare `socket`, `connect`, `bind`, `send`, `sendto`, `recv`, `close`, `htonl` and `htons`. Windows GNU targets declare the Winsock equivalents and emit a lazy `nus_net_init` helper around `WSAStartup`.
+
+The Windows native toolchain adds `-lws2_32` automatically. The supported Windows ABI remains `x86_64-w64-windows-gnu`; no MSVC runtime/toolset is introduced.
+
+`Vec<u8>` is the wire-buffer representation. Receive operations allocate a vector backing store with `malloc`, set length to the number of bytes returned by the OS, and transfer that allocation into `Result<Vec<u8>, NetworkError>`. Existing Result/drop lowering therefore owns all cleanup paths.

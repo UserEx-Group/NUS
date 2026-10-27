@@ -69,6 +69,18 @@ enum RouteStatus {
     Offline,
 }
 
+fn local_endpoint(port: u16) -> SocketAddr {
+    socket_addr(ipv4(127, 0, 0, 1), port)
+}
+
+fn connect_native(address: &SocketAddr) -> Result<TcpStream, NetworkError> {
+    tcp_connect(address)
+}
+
+fn bind_native(address: &SocketAddr) -> Result<UdpSocket, NetworkError> {
+    udp_bind(address)
+}
+
 fn route_port(okay: bool) -> Result<i32, string> {
     let message = "route offline";
     let result = if okay {
@@ -129,6 +141,9 @@ fn main() {
     for name in names {
         print(name);
     }
+
+    let local = local_endpoint(8080);
+    print(socket_port(&local));
 
     let status = RouteStatus::Ready(8080);
     let status_port = match status {
