@@ -1,6 +1,6 @@
-# NUS Generics & Traits — Milestone 11
+# NUS Generics & Static Traits — through Milestone 13
 
-Milestone 11 introduces the first compile-time polymorphism model for NUS. The implementation is deliberately monomorphization-first: generic source functions are templates and only concrete specializations used by the program reach HIR, MIR and LLVM.
+NUS uses monomorphization-first compile-time polymorphism. Generic source functions and generic impl methods are templates; only concrete specializations used by the program reach HIR, MIR and LLVM.
 
 ## Generic functions
 
@@ -15,25 +15,25 @@ fn main() {
 }
 ```
 
-The two calls create distinct specializations, conceptually:
+The calls produce distinct concrete specializations such as:
 
 ```text
 identity$g$i32
 identity$g$bool
 ```
 
-The template itself is not emitted to LLVM.
+The unresolved template itself is not emitted to LLVM.
 
 ## Explicit generic arguments
 
-NUS uses turbofish syntax when inference is impossible or an explicit choice is preferred:
+NUS uses turbofish syntax when inference is impossible or an explicit choice is desired:
 
 ```nus
 let values: Vec<i32> = vec_new::<i32>();
 let missing: Option<i32> = none::<i32>();
 ```
 
-Milestone 11 requires a complete explicit argument list when turbofish is present.
+A complete explicit type-argument list is currently required whenever turbofish is present.
 
 ## Trait bounds
 
@@ -45,7 +45,7 @@ fn duplicate<T: Copy>(value: T) -> T {
 }
 ```
 
-Marker traits may be declared and implemented:
+User traits may also be used as generic capabilities:
 
 ```nus
 trait NetworkValue {}
@@ -61,49 +61,82 @@ fn accept<T: NetworkValue>(value: &T) -> i32 {
 }
 ```
 
-Milestone 11 marker traits have no methods, associated types, default implementations, dynamic dispatch or trait objects. They exist to establish compile-time capabilities and generic bounds without introducing vtables.
+Manual implementations of `Copy` remain rejected until the compiler can verify all Copy invariants recursively.
 
-Manual implementations of `Copy` are intentionally rejected until the compiler can verify all Copy invariants for user-defined types.
+## Trait methods and associated types
+
+Milestone 13 extends traits beyond marker-only declarations:
+
+```nus
+trait Readable {
+    type Item;
+    fn read(&self) -> Self::Item;
+}
+```
+
+An impl binds the associated type and implements the required method:
+
+```nus
+impl Readable for Box {
+    type Item = i32;
+    fn read(&self) -> i32 { self.value }
+}
+```
+
+`Self` and `Self::Item` are substituted while the compiler checks the impl contract. Dispatch is static; trait objects and vtables are not implemented.
+
+## Generic impl blocks
+
+Generic implementation patterns are supported:
+
+```nus
+impl<T> Vec<T> {
+    fn count(&self) -> usize {
+        self.len()
+    }
+}
+```
+
+Generic trait impls are supported as well:
+
+```nus
+trait Counted {
+    type Item;
+    fn count(&self) -> usize;
+}
+
+impl<T> Counted for Vec<T> {
+    type Item = T;
+    fn count(&self) -> usize { self.len() }
+}
+```
+
+When the semantic analyzer sees a call on a concrete receiver, it matches that receiver against the generic impl target, infers impl type parameters, checks bounds, substitutes the concrete signature, and records an on-demand method instantiation. HIR emits only those concrete instances.
 
 ## Generic `Vec<T>` runtime API
 
-The milestone 10 `vec_*_i32` bootstrap functions remain compatibility shims, but new code should use:
+Construction is still:
 
 ```nus
 let mut values: Vec<i32> = vec_new::<i32>();
-vec_push(&mut values, 10);
-vec_push(&mut values, 20);
-
-print(vec_len(&values));
-print(vec_get(&values, 1));
 ```
 
-`vec_new<T>`, `vec_push<T>` and `vec_len<T>` work with arbitrary concrete element types. `vec_get<T>` currently requires `T: Copy`, because returning a non-Copy element by value without removing it would duplicate ownership.
-
-`vec_push` transfers ownership of non-Copy elements into the vector. Native drop glue walks a `Vec<T>` and destroys non-Copy elements before freeing the allocation.
-
-Example:
+Instance syntax is now preferred for operations:
 
 ```nus
-let literal = "owned";
-let value = string_clone(&literal);
-
-let mut values: Vec<string> = vec_new::<string>();
-vec_push(&mut values, value);
+values.push(10);
+values.push(20);
+print(values.len());
+print(values.get(1));
 ```
 
-`value` is moved into the vector, and the string is eventually destroyed by the vector's recursive drop glue.
+`push<T>` transfers ownership of non-Copy elements into the vector. Vector drop glue destroys non-Copy elements before freeing the allocation. `get` currently requires `T: Copy` because returning an element by value without removing it would otherwise duplicate ownership.
+
+The older `vec_push`, `vec_len`, `vec_get` and type-specific bootstrap functions remain compatibility shims.
 
 ## `Option<T>` and `Result<T, E>`
 
-The type system now understands:
-
-```nus
-Option<i32>
-Result<i32, string>
-```
-
-and their generic constructors at semantic-analysis level:
+These generic algebraic types lower to native tagged values:
 
 ```nus
 let a: Option<i32> = some(42);
@@ -113,20 +146,16 @@ let c: Result<i32, string> = ok::<i32, string>(7);
 let d: Result<i32, string> = err::<i32, string>("network error");
 ```
 
-Milestone 12 adds native tagged-value lowering, exhaustive pattern matching and postfix `?` propagation for these types. See `ENUMS.md` for the algebraic-data-type rules and current pattern limitations.
+`match` is exhaustive and postfix `?` lowers to explicit CFG with ownership-aware early return. See `ENUMS.md`.
 
 ## Monomorphization boundary
-
-The semantic analyzer records concrete generic instantiations. HIR then lowers only those instances and substitutes generic type parameters with concrete types before MIR creation.
-
-This keeps later compiler stages free of unresolved `T` values:
 
 ```text
 AST template
    ↓
-semantic inference + bounds
+semantic inference + bounds / impl matching
    ↓
-instantiation registry
+function + method instantiation registry
    ↓
 typed specialized HIR
    ↓
@@ -135,19 +164,21 @@ MIR
 LLVM
 ```
 
-LLVM code generation treats an unresolved type parameter as an internal compiler error.
+LLVM code generation treats any unresolved source type parameter as an internal compiler error.
 
 ## Current limitations
 
-Milestone 11 does not yet implement:
+The generic/trait model does not yet implement:
 
-- generic structs defined by users;
-- generic methods;
-- trait methods;
-- associated types or constants;
+- user-defined generic structs or enums;
+- default trait method bodies;
+- generic methods declared directly inside traits;
 - `where` clauses;
-- specialization/overlapping impl resolution;
+- supertraits;
+- associated constants;
+- associated-type equality constraints such as `Iterator<Item = T>`;
 - trait objects or dynamic dispatch;
-- generic calls that must remain abstract across another generic template;
+- complete overlap/coherence checking for generic impls;
+- generic calls that must remain abstract through unsupported forms of nested generic dispatch.
 
-These restrictions keep the first generic model deterministic and monomorphization-friendly.
+See `TRAITS_ITERATORS.md` for method/iterator semantics and ownership boundaries introduced in Milestone 13.

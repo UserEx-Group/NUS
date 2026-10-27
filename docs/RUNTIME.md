@@ -63,3 +63,11 @@ User-defined destructors are not available yet.
 ## Milestone 11 generic runtime layer
 
 The `vec_*_i32` entry points remain compatibility shims, while the semantic/runtime interface now exposes generic `vec_new<T>`, `vec_push<T>`, `vec_len<T>` and `vec_get<T: Copy>`. Concrete element types are propagated through monomorphized HIR/MIR into LLVM. Non-Copy elements transferred into a vector are recursively destroyed by vector drop glue.
+
+## Milestone 13 vector methods and iterator ownership
+
+The generic vector runtime can now be reached through instance syntax: `push`, `len`, `get`, and consuming `into_iter`. These are resolved statically by semantic analysis and lowered to the existing concrete vector runtime operations.
+
+`Vec<T>::into_iter` transfers the backing allocation into `VecIter<T> { data, len, cap, index }`; the source vector is marked moved. Iterator drop glue destroys only elements at positions `index..len` before freeing the allocation. Direct `for value in vector` performs the same ownership transfer implicitly.
+
+Borrowing iterators are not part of this milestone. Returning references into a vector requires lifetime relationships that NUS does not yet model across function/method boundaries.

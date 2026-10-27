@@ -148,3 +148,13 @@ Native linking is launched directly rather than through `cmd.exe`. Generated exe
 ## Milestone 12 additions
 
 User-defined enums, `Option<T>` and `Result<T,E>` are native tagged values. `match` is lowered to discriminant-driven CFG blocks, and postfix `?` becomes an explicit success/error branch with early return. The backend emits variant construction, discriminant extraction, payload extraction, and active-variant drop glue. The current user-enum representation flattens variant payload fields into one aggregate rather than overlapping them, favoring correctness and simple lowering over compact size.
+
+## Milestone 13 additions
+
+Trait method contracts and associated types are fully resolved before backend lowering. Dispatch remains static: a concrete trait/inherent method call is lowered to a direct symbol rather than a vtable lookup.
+
+Methods from generic `impl<T>` blocks are monomorphized on demand. Semantic analysis infers the impl substitutions from the concrete receiver, HIR emits a concrete specialization, and MIR/LLVM never see the unresolved impl type parameters.
+
+`Vec<T>` now supports native instance operations `push`, `len`, `get` and `into_iter`. Consuming `for` lowers a vector into an owned `VecIter<T>` runtime aggregate containing `{ data, len, cap, index }`. Iterator MIR checks `index < len`, loads the current element, advances the index, and drop glue releases only the not-yet-consumed suffix on early destruction.
+
+Borrowing iterators are intentionally not lowered yet because their correctness depends on reference-return lifetime relationships that are outside the current lifetime model.

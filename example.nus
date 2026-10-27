@@ -1,5 +1,15 @@
 trait NetworkValue {}
 
+trait RouteKey {
+    type Output;
+    fn route_key(&self) -> Self::Output;
+}
+
+trait Counted {
+    type Item;
+    fn count(&self) -> usize;
+}
+
 struct Packet {
     source: u32,
     destination: u32,
@@ -8,17 +18,29 @@ struct Packet {
 
 impl NetworkValue for Packet {}
 
-impl Packet {
+impl RouteKey for Packet {
+    type Output = u32;
+
     fn route_key(&self) -> u32 {
         self.source + self.destination
     }
+}
 
+impl Packet {
     fn set_source(&mut self, source: u32) {
         self.source = source;
     }
 
     fn consume(self) {
         print(self.source, self.destination, self.payload_size);
+    }
+}
+
+impl<T> Counted for Vec<T> {
+    type Item = T;
+
+    fn count(&self) -> usize {
+        self.len()
     }
 }
 
@@ -78,17 +100,22 @@ fn main() {
     print(string_len(&owned), owned);
 
     let mut samples: Vec<i32> = vec_new::<i32>();
-    vec_push(&mut samples, 10);
-    vec_push(&mut samples, identity(20));
-    vec_push(&mut samples, 30);
-    print(vec_len(&samples), vec_get(&samples, 1));
+    samples.push(10);
+    samples.push(identity(20));
+    samples.push(30);
+    print(samples.count(), samples.get(1));
+
+    let mut sum = 0;
+    for sample in samples {
+        sum += sample;
+    }
+    print(sum);
 
     let item_literal = "owned-in-vector";
     let item = string_clone(&item_literal);
     let mut names: Vec<string> = vec_new::<string>();
-    vec_push(&mut names, item);
-    print(vec_len(&names));
-
+    names.push(item);
+    print(names.len());
 
     let status = RouteStatus::Ready(8080);
     let status_port = match status {

@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 12 — Enums, Pattern Matching & Native Results
+## Milestone 13 — Trait Interfaces, Generic Impls & Owned Iterators
 
-NUS now has nominal enums with payloads, exhaustive pattern matching, native `Option<T>` and `Result<T, E>`, and `?` propagation on top of the existing ownership, generics and native runtime pipeline.
+NUS now has statically checked trait methods and associated types, generic `impl<T>` blocks with on-demand monomorphization, idiomatic `Vec<T>` instance methods, and consuming vector iteration through an owned `VecIter<T>` runtime value.
 
 ```text
 .nus
@@ -14,9 +14,10 @@ NUS now has nominal enums with payloads, exhaustive pattern matching, native `Op
 Lexer → Parser → AST
  ↓
 SemanticAnalyzer
- ├─ generic inference
- ├─ trait bounds
- └─ instantiation registry
+ ├─ generic inference / trait bounds
+ ├─ trait contracts + associated types
+ ├─ generic impl matching
+ └─ generic function/method instantiation registry
  ↓
 Monomorphized typed HIR
  ↓
@@ -36,7 +37,7 @@ native executable
 ## Build the compiler
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
@@ -49,7 +50,7 @@ NUS uses the GNU Windows target:
 x86_64-w64-windows-gnu
 ```
 
-For the standalone toolchains used during development:
+PowerShell setup used during development:
 
 ```powershell
 $env:NUS_CLANG = "C:\LLVM\LLVM\bin\clang.exe"
@@ -65,102 +66,144 @@ The native toolchain passes the equivalent of:
 clang --target=x86_64-w64-windows-gnu --gcc-toolchain=C:\mingw64 ...
 ```
 
-No MSVC runtime or Visual Studio toolset is required for this target.
+No MSVC runtime or Visual Studio toolset is required. Generated Windows binaries used by tests are executed directly with `CreateProcessW`; `<NUS_MINGW>\bin` is added to the child `PATH` and CRLF output is normalized before assertions.
 
-### Windows native test execution
+## Trait methods and associated types
 
-Milestone 11.1 executes generated Windows binaries directly with `CreateProcessW` rather than routing them through `cmd.exe`. The child process receives `<NUS_MINGW>\bin` at the front of its `PATH`, so native tests can locate MinGW-w64 runtime DLLs independently of the shell used to start CTest. Captured CRLF output is normalized to LF before assertions.
-
-## Generic functions
+Traits can now define compile-time interfaces:
 
 ```nus
-fn identity<T>(value: T) -> T {
-    value
+trait RouteKey {
+    type Output;
+    fn route_key(&self) -> Self::Output;
 }
-
-fn main() {
-    let number = identity(42);
-    let flag = identity(true);
-}
-```
-
-NUS monomorphizes these calls into concrete functions such as:
-
-```text
-identity$g$i32
-identity$g$bool
-```
-
-Only concrete specializations reach MIR and LLVM.
-
-## Trait bounds
-
-```nus
-fn duplicate<T: Copy>(value: T) -> T {
-    value
-}
-```
-
-Marker traits are also supported:
-
-```nus
-trait NetworkValue {}
 
 struct Packet {
-    value: i32,
+    source: u32,
+    destination: u32,
 }
 
-impl NetworkValue for Packet {}
+impl RouteKey for Packet {
+    type Output = u32;
 
-fn route<T: NetworkValue>(value: &T) -> i32 {
+    fn route_key(&self) -> u32 {
+        self.source + self.destination
+    }
+}
+```
+
+The semantic analyzer verifies associated-type bindings, receivers, parameters and return types. Dispatch remains static: no trait object or vtable reaches MIR/LLVM.
+
+## Generic impls and method monomorphization
+
+Generic implementation blocks are templates:
+
+```nus
+trait Counted {
+    type Item;
+    fn count(&self) -> usize;
+}
+
+impl<T> Counted for Vec<T> {
+    type Item = T;
+
+    fn count(&self) -> usize {
+        self.len()
+    }
+}
+```
+
+A call on `Vec<i32>` resolves the generic impl, substitutes `T = i32`, and records a concrete method specialization. Only that specialization is emitted to HIR/MIR/LLVM.
+
+Generic bounds can use these implementations:
+
+```nus
+fn require_counted<T: Counted>(value: T) -> i32 {
     1
 }
 ```
 
-Milestone 11 traits are compile-time markers. Trait methods, associated types and dynamic dispatch are intentionally deferred.
+## `Vec<T>` instance API
 
-## Generic `Vec<T>`
-
-The milestone 10 `vec_*_i32` functions remain compatibility shims. New code uses generic operations:
+Construction remains a bootstrap generic function:
 
 ```nus
 let mut values: Vec<i32> = vec_new::<i32>();
-
-vec_push(&mut values, 10);
-vec_push(&mut values, 20);
-vec_push(&mut values, 30);
-
-print(vec_len(&values));
-print(vec_get(&values, 1));
 ```
 
-The backend computes the element stride from the concrete LLVM type, so the runtime is no longer hard-coded to `i32`.
-
-Owned values can also be moved into vectors:
+But normal operations now use method syntax:
 
 ```nus
-let literal = "owned";
-let owned = string_clone(&literal);
+values.push(10);
+values.push(20);
+values.push(30);
 
-let mut values: Vec<string> = vec_new::<string>();
-vec_push(&mut values, owned);
+print(values.len());
+print(values.get(1));
 ```
 
-`Vec<T>` drop glue destroys non-Copy elements before freeing the buffer. `vec_get` currently requires `T: Copy` to prevent accidental duplication of ownership.
+`push` transfers ownership, `len` borrows shared, and `get` currently requires `T: Copy` because it returns by value. The old global vector operations remain compatibility shims.
 
-## Native `Option<T>` and `Result<T, E>`
+## Owned iteration
 
-The type checker and native backend now understand:
+A vector can be consumed directly:
 
 ```nus
-let a: Option<i32> = some(42);
-let b: Option<i32> = none::<i32>();
+let mut sum = 0;
 
-let c: Result<i32, string> = ok::<i32, string>(7);
-let d: Result<i32, string> = err::<i32, string>("error");
+for value in values {
+    sum += value;
+}
 ```
 
-These values now lower to native tagged representations. `match` is exhaustive, and postfix `?` lowers to an explicit success/error branch with early return.
+or explicitly:
+
+```nus
+let iterator = values.into_iter();
+for value in iterator {
+    print(value);
+}
+```
+
+The runtime iterator is:
+
+```text
+VecIter<T> {
+    ptr data,
+    usize len,
+    usize cap,
+    usize index,
+}
+```
+
+Iteration consumes the original vector. An iterator dropped before exhaustion destroys only its remaining owned elements and then frees the backing allocation.
+
+Milestone 13 intentionally does **not** expose borrowing `.iter()` / `.iter_mut()` yet. Those require reference-return lifetime relationships that NUS does not currently express. `for` over `Vec<T>` / `VecIter<T>` also currently requires `T: Copy` until per-iteration non-Copy ownership/drop accounting is complete.
+
+## Enums and errors
+
+Milestone 12 functionality remains native:
+
+```nus
+enum NetworkError {
+    Timeout,
+    Refused,
+}
+
+fn connect(okay: bool) -> Result<i32, string> {
+    let message = "connection refused";
+    let result = if okay {
+        ok::<i32, string>(8080)
+    } else {
+        err::<i32, string>(string_clone(&message))
+    };
+
+    let port = result?;
+    ok::<i32, string>(port)
+}
+```
+
+`match` is exhaustive and `?` lowers to explicit success/error CFG with ownership transfer on the early-return path.
 
 ## Compiler modes
 
@@ -177,7 +220,7 @@ These values now lower to native tagged representations. `match` is exhaustive, 
 
 ## Tests
 
-Milestone 12 contains sixteen suites:
+Milestone 13 contains twenty suites:
 
 ```text
 lexer
@@ -196,12 +239,16 @@ generics
 generic_native
 enums
 enum_native
+traits
+trait_native
+iterators
+iterator_native
 ```
 
-The generic native test verifies monomorphized functions and generic vectors. The enum native suite additionally verifies user enums, native `Option`/`Result`, `?` propagation, and destruction of active owned payloads through LLVM and a native executable.
+The new native suites exercise concrete trait methods/associated types, generic trait impls, generic method specialization, `Vec<T>` method syntax, consuming `for`, explicit `into_iter`, and native iterator ownership/drop behavior.
 
 ## Current boundaries
 
-Still deferred: generic user enums/structs, generic methods, trait methods, `where` clauses, associated types, trait objects, nested variant patterns, non-Copy payload bindings in `match`, reference-return lifetimes, user-defined `Drop`, allocator APIs and optimized vector growth.
+Still deferred: user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, borrowing iterators, non-Copy loop yields, reference-return lifetimes, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs and optimized vector growth.
 
-See [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
+See [`docs/TRAITS_ITERATORS.md`](docs/TRAITS_ITERATORS.md), [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).

@@ -1,4 +1,4 @@
-# NUS MIR Flow Analysis
+# NUS MIR Flow Analysis — through Milestone 13
 
 Milestone 8 introduces control-flow-sensitive ownership analysis on MIR.
 
@@ -88,3 +88,13 @@ Milestone 8 intentionally does not solve every lifetime problem. It does not yet
 - precise alias analysis for arbitrary pointer-derived places.
 
 The current goal is a sound and inspectable CFG-local ownership foundation for native code generation.
+
+## Consuming iterators — Milestone 13
+
+`for value in vector` consumes an owned `Vec<T>` and lowers it to an owned `VecIter<T>`. The source vector becomes moved immediately. An explicit `vector.into_iter()` follows the same ownership transfer.
+
+Loop dataflow now initializes unvisited non-entry block states at the lattice bottom rather than manufacturing an `Uninitialized` predecessor. This matters for backedges: before the correction, a loop header could merge with a not-yet-computed backedge and incorrectly conclude that its owned iterator temporary was unavailable on one path.
+
+`VecIter<T>` drop glue is progress-aware. Because the iterator stores its current index, an early exit destroys only the elements not yet yielded and then frees the backing allocation.
+
+Iteration over `Vec<T>` / `VecIter<T>` currently requires `T: Copy`. Complete per-iteration move/drop accounting for non-Copy yielded bindings remains deferred. Borrowing `.iter()` / `.iter_mut()` is also deferred until reference-return lifetime relationships can be expressed soundly.

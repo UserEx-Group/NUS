@@ -1,4 +1,4 @@
-# NUS Native ABI — Milestone 10
+# NUS Native ABI — through Milestone 13
 
 This document records the first explicit native ABI contract used by the bootstrap compiler. It is intentionally versioned and unstable before NUS 1.0.
 
@@ -71,3 +71,20 @@ The implementation lives in `codegen/Layout` so type layout is no longer an impl
 `Option<T>` and `Result<T, E>` now have native tagged representations. `Option` uses a boolean discriminant (`None = 0`, `Some = 1`); `Result` uses a boolean discriminant (`Ok = 0`, `Err = 1`). Only the active payload is destroyed.
 
 User-defined enums use an `i32` discriminant followed by storage for the payload fields of their declared variants. The current bootstrap ABI lays payload fields out sequentially rather than overlapping them as a compact union. This is deliberately simple and sound but not space-optimal; a future ABI revision may use overlapping payload storage once layout optimizations are formalized.
+
+## Owned vector iterator — Milestone 13
+
+Consuming iteration over `Vec<T>` uses a four-word runtime value:
+
+```text
+VecIter<T> {
+    ptr data,
+    usize len,
+    usize cap,
+    usize index,
+}
+```
+
+On a 64-bit target this is 32 bytes with 8-byte alignment. `Vec<T>::into_iter` transfers the vector allocation into this iterator and clears ownership from the source vector. The index denotes the first not-yet-yielded element.
+
+Dropping an unfinished iterator destroys remaining non-Copy elements from `index` through `len` and then releases `data`. The source vector must not drop the transferred allocation.
