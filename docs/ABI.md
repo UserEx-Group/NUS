@@ -64,3 +64,10 @@ nusc file.nus --layout
 ```
 
 The implementation lives in `codegen/Layout` so type layout is no longer an implicit property of LLVM emission.
+
+
+## Tagged values — Milestone 12
+
+`Option<T>` and `Result<T, E>` now have native tagged representations. `Option` uses a boolean discriminant (`None = 0`, `Some = 1`); `Result` uses a boolean discriminant (`Ok = 0`, `Err = 1`). Only the active payload is destroyed.
+
+User-defined enums use an `i32` discriminant followed by storage for the payload fields of their declared variants. The current bootstrap ABI lays payload fields out sequentially rather than overlapping them as a compact union. This is deliberately simple and sound but not space-optimal; a future ABI revision may use overlapping payload storage once layout optimizations are formalized.

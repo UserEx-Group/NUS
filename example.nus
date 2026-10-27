@@ -38,6 +38,23 @@ fn rewrite(packet: &mut Packet, source: u32) {
     packet.source = source;
 }
 
+enum RouteStatus {
+    Ready(i32),
+    Offline,
+}
+
+fn route_port(okay: bool) -> Result<i32, string> {
+    let message = "route offline";
+    let result = if okay {
+        ok::<i32, string>(8080)
+    } else {
+        err::<i32, string>(string_clone(&message))
+    };
+    let port = result?;
+
+    ok::<i32, string>(port + 1)
+}
+
 fn main() {
     let mut packet = Packet {
         source: 10,
@@ -71,6 +88,20 @@ fn main() {
     let mut names: Vec<string> = vec_new::<string>();
     vec_push(&mut names, item);
     print(vec_len(&names));
+
+
+    let status = RouteStatus::Ready(8080);
+    let status_port = match status {
+        RouteStatus::Ready(value) => value,
+        RouteStatus::Offline => 0,
+    };
+    print(status_port);
+
+    let routed = route_port(true);
+    match routed {
+        Ok(value) => print(value),
+        Err(_) => print("route-error"),
+    }
 
     packet.consume();
 }

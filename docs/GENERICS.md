@@ -94,7 +94,7 @@ vec_push(&mut values, value);
 
 `value` is moved into the vector, and the string is eventually destroyed by the vector's recursive drop glue.
 
-## `Option<T>` and `Result<T, E>` foundations
+## `Option<T>` and `Result<T, E>`
 
 The type system now understands:
 
@@ -113,7 +113,7 @@ let c: Result<i32, string> = ok::<i32, string>(7);
 let d: Result<i32, string> = err::<i32, string>("network error");
 ```
 
-Their native constructor lowering and pattern matching are intentionally deferred. Programs that use those constructors can be type-checked in Milestone 11, but should not yet be passed to `--build`.
+Milestone 12 adds native tagged-value lowering, exhaustive pattern matching and postfix `?` propagation for these types. See `ENUMS.md` for the algebraic-data-type rules and current pattern limitations.
 
 ## Monomorphization boundary
 
@@ -149,6 +149,5 @@ Milestone 11 does not yet implement:
 - specialization/overlapping impl resolution;
 - trait objects or dynamic dispatch;
 - generic calls that must remain abstract across another generic template;
-- native `Option`/`Result` constructors and pattern matching.
 
 These restrictions keep the first generic model deterministic and monomorphization-friendly.

@@ -1,4 +1,4 @@
-# NUS Native Code Generation — Milestone 9
+# NUS Native Code Generation — through Milestone 12
 
 Milestone 9 introduces the first executable backend for NUS.
 
@@ -69,7 +69,7 @@ $env:NUS_CLANG = "C:\\LLVM\\bin\\clang.exe"
 
 ## Supported MIR lowering
 
-Milestone 9 lowers:
+The native backend currently lowers:
 
 - local variables and assignments;
 - integer, floating point, boolean, char and string literals;
@@ -81,7 +81,10 @@ Milestone 9 lowers:
 - arrays and direct indexing;
 - ranges and range iterator MIR operations;
 - built-in `print` and `assert`;
-- trivial drop/drop-if placeholders.
+- native drop/drop-if flags and recursive drop glue;
+- generic `Vec<T>` runtime operations;
+- user enum / `Option` / `Result` tagged values;
+- discriminant and variant-payload extraction.
 
 ## Built-in print
 
@@ -109,17 +112,13 @@ The literal begins as the default `i32` type in the frontend. The native backend
 
 ## Drops
 
-MIR `drop` and `drop.if.init` are recognized by the backend. They are currently no-ops for the types that can reach native code because NUS has not yet introduced user-defined destructors or heap-owning native runtime objects.
-
-The explicit MIR instructions are preserved so later milestones can lower them to destructors and drop flags without changing the frontend.
+MIR `drop` and `drop.if.init` lower to native initialization/drop flags. Heap-owned `string`, `Vec<T>`, structs/arrays containing owned values, and active enum payloads receive recursive drop glue. A move clears the source initialization flag so the backend cannot double-destroy transferred ownership. User-defined `Drop` implementations remain deferred.
 
 ## Deliberate limitations
 
 Milestone 9 is not yet a complete ABI/runtime implementation. Native code generation does not yet promise support for:
 
 - user-defined `Drop` implementations;
-- heap allocation;
-- full string ownership;
 - slices created from ranges;
 - dynamic dispatch or function pointers;
 - async/concurrency runtime;
@@ -139,9 +138,13 @@ Generic source functions are monomorphized before MIR. The LLVM backend never re
 
 Generic `Vec<T>` operations use the concrete LLVM element type. `vec_push` derives element size using a null GEP/`ptrtoint` sequence instead of a hard-coded element width, and vector drop glue walks non-Copy elements before releasing the allocation.
 
-`Option<T>` and `Result<T,E>` have preliminary ABI/type representations, but their constructors are intentionally blocked from native lowering until tagged-value operations and pattern matching are implemented.
+`Option<T>` and `Result<T,E>` now lower to native tagged values. User enums lower to a discriminant plus payload storage; MIR explicitly extracts discriminants/payloads for `match`, while `?` lowers to a branch that returns the error/empty variant early. Drop glue destroys only the active non-Copy payload.
 
 
 ## Windows process execution
 
 Native linking is launched directly rather than through `cmd.exe`. Generated executables used by integration tests are also started with `CreateProcessW`, with stdout captured through an inherited pipe. The child process receives the configured MinGW-w64 `bin` directory in `PATH`, avoiding shell quoting issues and missing runtime DLLs. Test output is normalized from CRLF to LF before comparison.
+
+## Milestone 12 additions
+
+User-defined enums, `Option<T>` and `Result<T,E>` are native tagged values. `match` is lowered to discriminant-driven CFG blocks, and postfix `?` becomes an explicit success/error branch with early return. The backend emits variant construction, discriminant extraction, payload extraction, and active-variant drop glue. The current user-enum representation flattens variant payload fields into one aggregate rather than overlapping them, favoring correctness and simple lowering over compact size.

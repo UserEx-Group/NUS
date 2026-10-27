@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 11 — Generics & Traits Foundations
+## Milestone 12 — Enums, Pattern Matching & Native Results
 
-NUS now has compile-time generic functions, marker-trait bounds, monomorphization, generic `Vec<T>` runtime operations, and semantic foundations for `Option<T>` and `Result<T, E>`.
+NUS now has nominal enums with payloads, exhaustive pattern matching, native `Option<T>` and `Result<T, E>`, and `?` propagation on top of the existing ownership, generics and native runtime pipeline.
 
 ```text
 .nus
@@ -148,9 +148,9 @@ vec_push(&mut values, owned);
 
 `Vec<T>` drop glue destroys non-Copy elements before freeing the buffer. `vec_get` currently requires `T: Copy` to prevent accidental duplication of ownership.
 
-## `Option<T>` and `Result<T, E>`
+## Native `Option<T>` and `Result<T, E>`
 
-The type checker now understands:
+The type checker and native backend now understand:
 
 ```nus
 let a: Option<i32> = some(42);
@@ -160,7 +160,7 @@ let c: Result<i32, string> = ok::<i32, string>(7);
 let d: Result<i32, string> = err::<i32, string>("error");
 ```
 
-These constructors are semantic-only in Milestone 11; native construction, matching and `?` lowering are future work.
+These values now lower to native tagged representations. `match` is exhaustive, and postfix `?` lowers to an explicit success/error branch with early return.
 
 ## Compiler modes
 
@@ -177,7 +177,7 @@ These constructors are semantic-only in Milestone 11; native construction, match
 
 ## Tests
 
-Milestone 11 contains fourteen suites:
+Milestone 12 contains sixteen suites:
 
 ```text
 lexer
@@ -194,12 +194,14 @@ layout
 runtime
 generics
 generic_native
+enums
+enum_native
 ```
 
-The generic native test verifies actual monomorphized functions plus generic `Vec<i32>` and `Vec<string>` behavior through LLVM and a native executable.
+The generic native test verifies monomorphized functions and generic vectors. The enum native suite additionally verifies user enums, native `Option`/`Result`, `?` propagation, and destruction of active owned payloads through LLVM and a native executable.
 
 ## Current boundaries
 
-Still deferred: generic structs, generic methods, trait methods, `where` clauses, associated types, trait objects, native `Option`/`Result` lowering, reference-return lifetimes, user-defined `Drop`, allocator APIs and optimized vector growth.
+Still deferred: generic user enums/structs, generic methods, trait methods, `where` clauses, associated types, trait objects, nested variant patterns, non-Copy payload bindings in `match`, reference-return lifetimes, user-defined `Drop`, allocator APIs and optimized vector growth.
 
-See [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
+See [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
