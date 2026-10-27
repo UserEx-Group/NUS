@@ -129,7 +129,7 @@ ast::SourceFile Parser::parseSourceFile() {
     return file;
 }
 
-std::optional<ast::FunctionDecl> Parser::parseFunction(bool allow_receiver) {
+std::optional<ast::FunctionDecl> Parser::parseFunction(bool allow_receiver, bool require_body) {
     const auto start = expect(TokenKind::KwFn, "expected `fn`").span;
     const auto& name = expect(TokenKind::Identifier, "expected function name");
 
@@ -159,6 +159,12 @@ std::optional<ast::FunctionDecl> Parser::parseFunction(bool allow_receiver) {
     expect(TokenKind::RightParen, "expected `)` after parameters");
 
     if (match(TokenKind::Arrow)) function.return_type = parseType();
+
+    if (!require_body) {
+        const auto end = expect(TokenKind::Semicolon, "expected `;` after trait method signature").span;
+        function.span = spanFrom(start, end);
+        return function;
+    }
 
     if (!check(TokenKind::LeftBrace)) {
         errorAt(current(), "expected function body");
@@ -302,10 +308,26 @@ std::optional<ast::TraitDecl> Parser::parseTrait() {
     ast::TraitDecl declaration;
     declaration.name = tokenText(name);
     expect(TokenKind::LeftBrace, "expected `{` after trait name");
-    if (!check(TokenKind::RightBrace)) {
-        errorAt(current(), "milestone 11 supports marker traits only; trait items are not implemented yet");
-        while (!check(TokenKind::RightBrace) && !isAtEnd()) advance();
+
+    while (!check(TokenKind::RightBrace) && !isAtEnd()) {
+        if (match(TokenKind::KwType)) {
+            const auto type_start = previous().span;
+            const auto& assoc = expect(TokenKind::Identifier, "expected associated type name");
+            ast::AssociatedTypeDecl item;
+            item.name = tokenText(assoc);
+            const auto finish = expect(TokenKind::Semicolon, "expected `;` after associated type declaration").span;
+            item.span = spanFrom(type_start, finish);
+            declaration.associated_types.push_back(std::move(item));
+            continue;
+        }
+        if (check(TokenKind::KwFn)) {
+            if (auto method = parseFunction(true, false)) declaration.methods.push_back(std::move(*method));
+            continue;
+        }
+        errorAt(current(), "expected associated type or method signature inside trait");
+        synchronizeStatement();
     }
+
     const auto end = expect(TokenKind::RightBrace, "expected `}` after trait declaration").span;
     declaration.span = spanFrom(start, end);
     return declaration;
@@ -314,6 +336,7 @@ std::optional<ast::TraitDecl> Parser::parseTrait() {
 std::optional<ast::ImplDecl> Parser::parseImpl() {
     const auto start = expect(TokenKind::KwImpl, "expected `impl`").span;
     ast::ImplDecl declaration;
+    declaration.generic_parameters = parseGenericParameters();
     auto first = parseType();
     if (match(TokenKind::KwFor)) {
         declaration.trait = std::move(first);
@@ -324,8 +347,20 @@ std::optional<ast::ImplDecl> Parser::parseImpl() {
     expect(TokenKind::LeftBrace, "expected `{` after impl target");
 
     while (!check(TokenKind::RightBrace) && !isAtEnd()) {
+        if (match(TokenKind::KwType)) {
+            const auto type_start = previous().span;
+            const auto& assoc = expect(TokenKind::Identifier, "expected associated type name");
+            expect(TokenKind::Equal, "expected `=` in associated type binding");
+            ast::AssociatedTypeDecl binding;
+            binding.name = tokenText(assoc);
+            binding.value = parseType();
+            const auto finish = expect(TokenKind::Semicolon, "expected `;` after associated type binding").span;
+            binding.span = spanFrom(type_start, finish);
+            declaration.associated_types.push_back(std::move(binding));
+            continue;
+        }
         if (!check(TokenKind::KwFn)) {
-            errorAt(current(), "expected method declaration inside `impl`");
+            errorAt(current(), "expected associated type binding or method declaration inside `impl`");
             synchronizeTopLevel();
             if (check(TokenKind::RightBrace)) break;
             continue;

@@ -306,13 +306,22 @@ struct EnumDecl : Node {
     std::vector<EnumVariantDecl> variants;
 };
 
+struct AssociatedTypeDecl : Node {
+    std::string name;
+    std::optional<TypeRef> value;
+};
+
 struct TraitDecl : Node {
     std::string name;
+    std::vector<AssociatedTypeDecl> associated_types;
+    std::vector<FunctionDecl> methods;
 };
 
 struct ImplDecl : Node {
+    std::vector<GenericParameter> generic_parameters;
     std::optional<TypeRef> trait;
     TypeRef target;
+    std::vector<AssociatedTypeDecl> associated_types;
     std::vector<FunctionDecl> methods;
 };
 

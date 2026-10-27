@@ -22,6 +22,10 @@ std::string AstPrinter::print(const SourceFile& file) const {
 
 void AstPrinter::printTrait(const TraitDecl& declaration, std::string& out, int depth) const {
     line(out, depth, "TraitDecl " + declaration.name);
+    for (const auto& associated : declaration.associated_types) {
+        line(out, depth + 1, "AssociatedType " + associated.name);
+    }
+    for (const auto& method : declaration.methods) printFunction(method, out, depth + 1);
 }
 
 void AstPrinter::printStruct(const StructDecl& declaration, std::string& out, int depth) const {
@@ -64,6 +68,21 @@ void AstPrinter::printPattern(const Pattern& pattern, std::string& out, int dept
 void AstPrinter::printImpl(const ImplDecl& declaration, std::string& out, int depth) const {
     line(out, depth, declaration.trait ? "TraitImpl " + declaration.trait->name() + " for " + declaration.target.name()
                                        : "ImplDecl " + declaration.target.name());
+    for (const auto& generic : declaration.generic_parameters) {
+        std::string text = "Generic " + generic.name;
+        if (!generic.bounds.empty()) {
+            text += ": ";
+            for (std::size_t i = 0; i < generic.bounds.size(); ++i) {
+                if (i != 0) text += " + ";
+                text += generic.bounds[i];
+            }
+        }
+        line(out, depth + 1, text);
+    }
+    for (const auto& associated : declaration.associated_types) {
+        line(out, depth + 1, "AssociatedType " + associated.name +
+             (associated.value ? " = " + associated.value->name() : std::string{}));
+    }
     for (const auto& method : declaration.methods) printFunction(method, out, depth + 1);
 }
 
@@ -90,7 +109,8 @@ void AstPrinter::printFunction(const FunctionDecl& function, std::string& out, i
         line(out, depth + 1, "Parameter " + parameter.name + ": " + parameter.type.name());
     }
     if (function.return_type) line(out, depth + 1, "ReturnType " + function.return_type->name());
-    printBlock(*function.body, out, depth + 1);
+    if (function.body) printBlock(*function.body, out, depth + 1);
+    else line(out, depth + 1, "Signature");
 }
 
 void AstPrinter::printBlock(const BlockExpr& block, std::string& out, int depth) const {
