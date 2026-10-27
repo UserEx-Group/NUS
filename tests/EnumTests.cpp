@@ -43,11 +43,11 @@ bool hasDiagnostic(const nus::sema::SemanticAnalyzer& semantic, std::string_view
 
 void testEnumAndMatch() {
     auto checked = check(R"(
-        enum NetworkError { Timeout, Code(i32), }
-        fn classify(error: NetworkError) -> i32 {
+        enum AppError { Timeout, Code(i32), }
+        fn classify(error: AppError) -> i32 {
             return match error {
-                NetworkError::Timeout => 1,
-                NetworkError::Code(code) => code,
+                AppError::Timeout => 1,
+                AppError::Code(code) => code,
             };
         }
     )");

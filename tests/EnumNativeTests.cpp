@@ -60,13 +60,13 @@ int main() {
     }
 
     const auto ir = compileIr(R"(
-        enum NetworkError { Timeout, Code(i32), }
+        enum AppError { Timeout, Code(i32), }
         enum Message { Ping, Text(string), }
 
-        fn classify(error: NetworkError) -> i32 {
+        fn classify(error: AppError) -> i32 {
             return match error {
-                NetworkError::Timeout => 1,
-                NetworkError::Code(code) => code,
+                AppError::Timeout => 1,
+                AppError::Code(code) => code,
             };
         }
 
@@ -85,8 +85,8 @@ int main() {
         }
 
         fn main() {
-            print(classify(NetworkError::Timeout));
-            print(classify(NetworkError::Code(9)));
+            print(classify(AppError::Timeout));
+            print(classify(AppError::Code(9)));
 
             let option = some(5);
             let option_value = match option {

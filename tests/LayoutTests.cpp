@@ -44,6 +44,17 @@ int main() {
     const auto mut_iterator_layout = layouts.layoutOf(Type::borrowedVectorIterator(Type::simple(TypeKind::I32), true));
     if (mut_iterator_layout.size != 24 || mut_iterator_layout.alignment != 8) fail("64-bit VecMutIter ABI must be three words");
 
+    const auto ip_layout = layouts.layoutOf(Type::simple(TypeKind::IpAddr));
+    if (ip_layout.size != 4 || ip_layout.alignment != 4) fail("IpAddr ABI mismatch");
+    const auto socket_addr_layout = layouts.layoutOf(Type::simple(TypeKind::SocketAddr));
+    if (socket_addr_layout.size != 8 || socket_addr_layout.alignment != 4) fail("SocketAddr ABI mismatch");
+    const auto error_layout = layouts.layoutOf(Type::simple(TypeKind::NetworkError));
+    if (error_layout.size != 4 || error_layout.alignment != 4) fail("NetworkError ABI mismatch");
+    const auto tcp_layout = layouts.layoutOf(Type::simple(TypeKind::TcpStream));
+    if (tcp_layout.size != 8 || tcp_layout.alignment != 8) fail("TcpStream ABI mismatch");
+    const auto udp_layout = layouts.layoutOf(Type::simple(TypeKind::UdpSocket));
+    if (udp_layout.size != 8 || udp_layout.alignment != 8) fail("UdpSocket ABI mismatch");
+
     const auto packet_layout = layouts.layoutOfStruct("Packet");
     if (packet_layout.layout.size != 16 || packet_layout.layout.alignment != 8) fail("Packet layout mismatch");
     if (packet_layout.fields.size() != 3 || packet_layout.fields[0].offset != 0 ||

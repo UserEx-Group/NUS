@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.14.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.15.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -136,3 +136,11 @@ add_test(NAME borrowed_iterators COMMAND nus_borrowed_iterator_tests)
 add_executable(nus_borrowed_iterator_native_tests tests/BorrowedIteratorNativeTests.cpp)
 target_link_libraries(nus_borrowed_iterator_native_tests PRIVATE nus_frontend)
 add_test(NAME borrowed_iterator_native COMMAND nus_borrowed_iterator_native_tests)
+
+add_executable(nus_network_tests tests/NetworkTests.cpp)
+target_link_libraries(nus_network_tests PRIVATE nus_frontend)
+add_test(NAME network COMMAND nus_network_tests)
+
+add_executable(nus_network_native_tests tests/NetworkNativeTests.cpp)
+target_link_libraries(nus_network_native_tests PRIVATE nus_frontend)
+add_test(NAME network_native COMMAND nus_network_native_tests)
