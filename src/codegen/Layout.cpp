@@ -18,6 +18,13 @@ const mir::Struct& LayoutEngine::findStruct(const std::string& name) const {
     throw std::runtime_error("layout: unknown struct `" + name + "`");
 }
 
+const mir::Enum& LayoutEngine::findEnum(const std::string& name) const {
+    for (const auto& enumeration : program_.enums) {
+        if (enumeration.name == name) return enumeration;
+    }
+    throw std::runtime_error("layout: unknown enum `" + name + "`");
+}
+
 TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
     using sema::TypeKind;
     const std::size_t pointer = target_.pointer_bits / 8U;
@@ -81,6 +88,20 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         }
         case TypeKind::Struct:
             return layoutOfStruct(type.nominal_name).layout;
+        case TypeKind::Enum: {
+            const auto& enumeration = findEnum(type.nominal_name);
+            std::size_t offset = 4;
+            std::size_t alignment = 4;
+            for (const auto& variant : enumeration.variants) {
+                for (const auto& payload : variant.payloads) {
+                    const auto item = layoutOf(payload);
+                    offset = alignTo(offset, item.alignment);
+                    offset += item.size;
+                    alignment = std::max(alignment, item.alignment);
+                }
+            }
+            return {alignTo(offset, alignment), alignment};
+        }
     }
     throw std::runtime_error("layout: unsupported type");
 }
