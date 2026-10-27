@@ -53,6 +53,17 @@ private:
         std::unordered_map<std::string, MethodInfo> methods;
     };
 
+    struct EnumVariantInfo {
+        std::size_t tag{0};
+        std::vector<Type> payloads;
+    };
+
+    struct EnumInfo {
+        const ast::EnumDecl* declaration{nullptr};
+        std::unordered_map<std::string, EnumVariantInfo> variants;
+        std::vector<std::string> variant_order;
+    };
+
     struct GenericFunctionInfo {
         const ast::FunctionDecl* declaration{nullptr};
         std::vector<ast::GenericParameter> generic_parameters;
@@ -71,6 +82,8 @@ private:
     void collectTraits(const ast::SourceFile& file);
     void collectTraitImpls(const ast::SourceFile& file);
     void collectStructNames(const ast::SourceFile& file);
+    void collectEnumNames(const ast::SourceFile& file);
+    void collectEnumVariants(const ast::SourceFile& file);
     void collectStructFields(const ast::SourceFile& file);
     void collectFunctions(const ast::SourceFile& file);
     void collectMethods(const ast::SourceFile& file);
@@ -97,11 +110,15 @@ private:
     [[nodiscard]] Type checkArray(const ast::ArrayExpr& expression);
     [[nodiscard]] Type checkRange(const ast::RangeExpr& expression);
     [[nodiscard]] Type checkStructLiteral(const ast::StructLiteralExpr& expression);
+    [[nodiscard]] Type checkVariant(const ast::VariantExpr& expression);
+    [[nodiscard]] Type checkMatch(const ast::MatchExpr& expression);
+    [[nodiscard]] Type checkTry(const ast::TryExpr& expression);
     [[nodiscard]] Type checkIf(const ast::IfExpr& expression);
     [[nodiscard]] Type checkWhile(const ast::WhileExpr& expression);
     [[nodiscard]] Type checkLoop(const ast::LoopExpr& expression);
     [[nodiscard]] Type checkFor(const ast::ForExpr& expression);
 
+    void checkPattern(const ast::Pattern& pattern, const Type& scrutinee, std::unordered_set<std::string>& covered, bool& irrefutable);
     [[nodiscard]] const StructInfo* findStruct(const Type& type) const;
     [[nodiscard]] StructInfo* findStruct(const Type& type);
     [[nodiscard]] const MethodInfo* findMethod(const Type& type, std::string_view name) const;
@@ -148,6 +165,7 @@ private:
     std::unordered_set<std::string> traits_;
     std::unordered_map<std::string, std::unordered_set<std::string>> trait_impls_;
     std::unordered_map<std::string, StructInfo> structs_;
+    std::unordered_map<std::string, EnumInfo> enums_;
     Type current_return_type_{Type::simple(TypeKind::Unit)};
     int loop_depth_{0};
 

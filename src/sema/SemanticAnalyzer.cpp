@@ -159,6 +159,7 @@ void SemanticAnalyzer::reset() {
     traits_.clear();
     trait_impls_.clear();
     structs_.clear();
+    enums_.clear();
     current_return_type_ = unitType();
     loop_depth_ = 0;
     next_symbol_id_ = 1;
@@ -173,7 +174,9 @@ void SemanticAnalyzer::analyze(const ast::SourceFile& file) {
     registerBuiltins();
     collectTraits(file);
     collectStructNames(file);
+    collectEnumNames(file);
     collectStructFields(file);
+    collectEnumVariants(file);
     collectTraitImpls(file);
     collectFunctions(file);
     collectMethods(file);
@@ -321,6 +324,49 @@ void SemanticAnalyzer::collectStructNames(const ast::SourceFile& file) {
         StructInfo info;
         info.declaration = &structure;
         structs_.emplace(structure.name, std::move(info));
+    }
+}
+
+void SemanticAnalyzer::collectEnumNames(const ast::SourceFile& file) {
+    for (const auto& enumeration : file.enums) {
+        if (simpleTypeKind(enumeration.name) || enumeration.name == "Vec" || enumeration.name == "Option" || enumeration.name == "Result") {
+            error(enumeration.span, "enum name `" + enumeration.name + "` conflicts with a built-in type");
+            continue;
+        }
+        if (structs_.contains(enumeration.name) || enums_.contains(enumeration.name)) {
+            error(enumeration.span, "duplicate type `" + enumeration.name + "`");
+            continue;
+        }
+        EnumInfo info;
+        info.declaration = &enumeration;
+        enums_.emplace(enumeration.name, std::move(info));
+    }
+}
+
+void SemanticAnalyzer::collectEnumVariants(const ast::SourceFile& file) {
+    for (const auto& enumeration : file.enums) {
+        auto found = enums_.find(enumeration.name);
+        if (found == enums_.end() || found->second.declaration != &enumeration) continue;
+        auto& info = found->second;
+        std::size_t tag = 0;
+        for (const auto& variant : enumeration.variants) {
+            if (info.variants.contains(variant.name)) {
+                error(variant.span, "duplicate variant `" + variant.name + "` in enum `" + enumeration.name + "`");
+                continue;
+            }
+            EnumVariantInfo variant_info;
+            variant_info.tag = tag++;
+            for (const auto& payload : variant.payload_types) {
+                auto payload_type = resolveType(payload);
+                if (payload_type.containsReference()) {
+                    error(payload.span, "reference enum payloads require lifetime inference and are not supported yet");
+                }
+                variant_info.payloads.push_back(std::move(payload_type));
+            }
+            info.variant_order.push_back(variant.name);
+            info.variants.emplace(variant.name, std::move(variant_info));
+        }
+        if (info.variants.empty()) error(enumeration.span, "enum `" + enumeration.name + "` must declare at least one variant");
     }
 }
 
@@ -578,6 +624,12 @@ Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
             return errorType();
         }
         base = Type::structure(base_name);
+    } else if (enums_.contains(base_name)) {
+        if (!type_ref.generic_arguments.empty()) {
+            error(type_ref.span, "user-defined generic enums are not supported yet");
+            return errorType();
+        }
+        base = Type::enumeration(base_name);
     } else {
         error(type_ref.span, "unknown type `" + base_name + "`");
         return errorType();
@@ -901,6 +953,15 @@ Type SemanticAnalyzer::checkExpr(const ast::Expr& expression) {
             break;
         case ast::ExprKind::StructLiteral:
             result = checkStructLiteral(static_cast<const ast::StructLiteralExpr&>(expression));
+            break;
+        case ast::ExprKind::Variant:
+            result = checkVariant(static_cast<const ast::VariantExpr&>(expression));
+            break;
+        case ast::ExprKind::Match:
+            result = checkMatch(static_cast<const ast::MatchExpr&>(expression));
+            break;
+        case ast::ExprKind::Try:
+            result = checkTry(static_cast<const ast::TryExpr&>(expression));
             break;
         case ast::ExprKind::Block:
             result = checkBlock(static_cast<const ast::BlockExpr&>(expression));
@@ -1375,6 +1436,196 @@ Type SemanticAnalyzer::checkStructLiteral(const ast::StructLiteralExpr& expressi
         if (!seen.contains(name)) error(expression.span, "missing initializer for field `" + name + "`");
     }
     return type;
+}
+
+Type SemanticAnalyzer::checkVariant(const ast::VariantExpr& expression) {
+    const auto found_enum = enums_.find(expression.enum_name);
+    if (found_enum == enums_.end()) {
+        error(expression.span, "unknown enum `" + expression.enum_name + "`");
+        for (const auto& payload : expression.payloads) (void)checkExpr(*payload);
+        return errorType();
+    }
+    const auto found_variant = found_enum->second.variants.find(expression.variant);
+    if (found_variant == found_enum->second.variants.end()) {
+        error(expression.span, "enum `" + expression.enum_name + "` has no variant `" + expression.variant + "`");
+        for (const auto& payload : expression.payloads) (void)checkExpr(*payload);
+        return errorType();
+    }
+    const auto& expected = found_variant->second.payloads;
+    if (expression.payloads.size() != expected.size()) {
+        error(expression.span, "variant `" + expression.enum_name + "::" + expression.variant + "` expects " +
+              std::to_string(expected.size()) + " payload value(s), found " + std::to_string(expression.payloads.size()));
+    }
+    const auto count = std::min(expression.payloads.size(), expected.size());
+    for (std::size_t i = 0; i < expression.payloads.size(); ++i) {
+        const Type actual = checkExpr(*expression.payloads[i]);
+        if (i >= count) continue;
+        if (!compatible(expected[i], actual, expression.payloads[i].get())) {
+            error(expression.payloads[i]->span, "variant payload " + std::to_string(i + 1) + " expects `" +
+                  expected[i].name() + "`, found `" + actual.name() + "`");
+        } else {
+            consumeValue(*expression.payloads[i], actual, "enum variant payload");
+        }
+    }
+    return Type::enumeration(expression.enum_name);
+}
+
+void SemanticAnalyzer::checkPattern(const ast::Pattern& pattern, const Type& scrutinee,
+                                    std::unordered_set<std::string>& covered, bool& irrefutable) {
+    if (pattern.kind == ast::PatternKind::Wildcard) {
+        irrefutable = true;
+        return;
+    }
+
+    auto declare_binding = [&](const std::string& name, const Type& type, SourceSpan span) {
+        Symbol symbol;
+        symbol.id = next_symbol_id_++;
+        symbol.name = name;
+        symbol.kind = SymbolKind::Variable;
+        symbol.type = type;
+        symbol.is_mutable = false;
+        symbol.span = span;
+        if (!symbols_.declare(std::move(symbol))) error(span, "duplicate pattern binding `" + name + "`");
+    };
+
+    auto payloads_for = [&](std::string_view variant) -> std::optional<std::vector<Type>> {
+        if (scrutinee.kind == TypeKind::Option && scrutinee.element) {
+            if (variant == "None") return std::vector<Type>{};
+            if (variant == "Some") return std::vector<Type>{*scrutinee.element};
+            return std::nullopt;
+        }
+        if (scrutinee.kind == TypeKind::Result && scrutinee.generic_arguments.size() == 2) {
+            if (variant == "Ok") return std::vector<Type>{scrutinee.generic_arguments[0]};
+            if (variant == "Err") return std::vector<Type>{scrutinee.generic_arguments[1]};
+            return std::nullopt;
+        }
+        if (scrutinee.kind == TypeKind::Enum) {
+            const auto e = enums_.find(scrutinee.nominal_name);
+            if (e == enums_.end()) return std::nullopt;
+            const auto v = e->second.variants.find(std::string(variant));
+            if (v == e->second.variants.end()) return std::nullopt;
+            return v->second.payloads;
+        }
+        return std::nullopt;
+    };
+
+    std::string variant_name;
+    bool treat_as_variant = pattern.kind == ast::PatternKind::Variant;
+    if (pattern.kind == ast::PatternKind::Name) {
+        if (payloads_for(pattern.name).has_value()) {
+            treat_as_variant = true;
+            variant_name = pattern.name;
+        } else {
+            declare_binding(pattern.name, scrutinee, pattern.span);
+            irrefutable = true;
+            return;
+        }
+    } else {
+        variant_name = pattern.variant;
+    }
+
+    if (!treat_as_variant) return;
+    if (!pattern.enum_name.empty() && scrutinee.kind == TypeKind::Enum && pattern.enum_name != scrutinee.nominal_name) {
+        error(pattern.span, "pattern variant belongs to enum `" + pattern.enum_name + "`, expected `" + scrutinee.name() + "`");
+        return;
+    }
+    const auto payloads = payloads_for(variant_name);
+    if (!payloads) {
+        error(pattern.span, "unknown variant `" + variant_name + "` for type `" + scrutinee.name() + "`");
+        return;
+    }
+    covered.insert(variant_name);
+    if (pattern.elements.size() != payloads->size()) {
+        error(pattern.span, "variant pattern `" + variant_name + "` expects " + std::to_string(payloads->size()) +
+              " payload pattern(s), found " + std::to_string(pattern.elements.size()));
+    }
+    const auto count = std::min(pattern.elements.size(), payloads->size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& child = pattern.elements[i];
+        if (child.kind == ast::PatternKind::Wildcard) continue;
+        if (child.kind != ast::PatternKind::Name) {
+            error(child.span, "nested variant patterns are not supported yet");
+            continue;
+        }
+        if (!(*payloads)[i].isCopy()) {
+            error(child.span, "binding non-Copy enum payloads in match is not supported yet; use `_` until move-pattern lowering is implemented");
+            continue;
+        }
+        declare_binding(child.name, (*payloads)[i], child.span);
+    }
+}
+
+Type SemanticAnalyzer::checkMatch(const ast::MatchExpr& expression) {
+    const Type scrutinee = checkExpr(*expression.scrutinee);
+    if (scrutinee.isError()) return errorType();
+    if (!(scrutinee.kind == TypeKind::Enum || scrutinee.kind == TypeKind::Option || scrutinee.kind == TypeKind::Result)) {
+        error(expression.scrutinee->span, "match requires an enum, Option, or Result value, found `" + scrutinee.name() + "`");
+    }
+    if (expression.arms.empty()) {
+        error(expression.span, "match expression requires at least one arm");
+        return errorType();
+    }
+
+    std::unordered_set<std::string> covered;
+    bool irrefutable = false;
+    std::optional<Type> result;
+    for (const auto& arm : expression.arms) {
+        pushScope();
+        bool arm_irrefutable = false;
+        checkPattern(arm.pattern, scrutinee, covered, arm_irrefutable);
+        const Type arm_type = arm.value ? checkExpr(*arm.value) : unitType();
+        if (!result) result = arm_type;
+        else if (!compatible(*result, arm_type, arm.value.get()) && !compatible(arm_type, *result, nullptr)) {
+            error(arm.span, "match arms have incompatible types `" + result->name() + "` and `" + arm_type.name() + "`");
+        } else if (!compatible(*result, arm_type, arm.value.get())) {
+            result = arm_type;
+        }
+        popScope();
+        if (arm_irrefutable) irrefutable = true;
+    }
+
+    if (!irrefutable) {
+        std::vector<std::string> expected;
+        if (scrutinee.kind == TypeKind::Option) expected = {"None", "Some"};
+        else if (scrutinee.kind == TypeKind::Result) expected = {"Ok", "Err"};
+        else if (scrutinee.kind == TypeKind::Enum) {
+            if (const auto e = enums_.find(scrutinee.nominal_name); e != enums_.end()) expected = e->second.variant_order;
+        }
+        for (const auto& variant : expected) {
+            if (!covered.contains(variant)) {
+                error(expression.span, "non-exhaustive match: missing variant `" + variant + "`");
+                break;
+            }
+        }
+    }
+    return result.value_or(unitType());
+}
+
+Type SemanticAnalyzer::checkTry(const ast::TryExpr& expression) {
+    const Type operand = checkExpr(*expression.operand);
+    if (operand.kind == TypeKind::Option && operand.element) {
+        if (current_return_type_.kind != TypeKind::Option || !current_return_type_.element) {
+            error(expression.span, "operator `?` on Option requires the enclosing function to return Option");
+            return errorType();
+        }
+        consumeValue(*expression.operand, operand, "try operand");
+        return *operand.element;
+    }
+    if (operand.kind == TypeKind::Result && operand.generic_arguments.size() == 2) {
+        if (current_return_type_.kind != TypeKind::Result || current_return_type_.generic_arguments.size() != 2) {
+            error(expression.span, "operator `?` on Result requires the enclosing function to return Result");
+            return errorType();
+        }
+        const Type& source_error = operand.generic_arguments[1];
+        const Type& target_error = current_return_type_.generic_arguments[1];
+        if (!compatible(target_error, source_error)) {
+            error(expression.span, "cannot propagate Result error type `" + source_error.name() + "` as `" + target_error.name() + "`");
+        }
+        consumeValue(*expression.operand, operand, "try operand");
+        return operand.generic_arguments[0];
+    }
+    if (!operand.isError()) error(expression.span, "operator `?` requires Option or Result, found `" + operand.name() + "`");
+    return errorType();
 }
 
 Type SemanticAnalyzer::checkIf(const ast::IfExpr& expression) {
