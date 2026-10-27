@@ -154,6 +154,12 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
                                  .operands = {object, index, value}, .span = expression.span});
                 return value;
             }
+            if (target.kind == hir::ExprKind::Unary && target.op == TokenKind::Star) {
+                const Operand pointer = lowerExpr(*target.operands.at(0));
+                emit(Instruction{.kind = InstructionKind::StoreDeref,
+                                 .operands = {pointer, value}, .span = expression.span});
+                return value;
+            }
             return value;
         }
         case hir::ExprKind::Call: {
@@ -401,7 +407,7 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
             terminate(Terminator{.kind = TerminatorKind::Branch, .condition = condition,
                                  .then_block = body, .else_block = exit, .span = expression.span});
             switchTo(body);
-            loop_targets_.push_back({exit, head});
+            loop_targets_.push_back(LoopTarget{.break_block = exit, .continue_block = head});
             (void)lowerExpr(*expression.operands.at(1));
             loop_targets_.pop_back();
             gotoIfOpen(head, expression.span);
@@ -413,7 +419,7 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
             const BlockId exit = createBlock();
             gotoIfOpen(body, expression.span);
             switchTo(body);
-            loop_targets_.push_back({exit, body});
+            loop_targets_.push_back(LoopTarget{.break_block = exit, .continue_block = body});
             (void)lowerExpr(*expression.operands.at(0));
             loop_targets_.pop_back();
             gotoIfOpen(body, expression.span);
@@ -442,9 +448,17 @@ Operand MirBuilder::lowerExpr(const hir::Expr& expression) {
             switchTo(body);
             emit(Instruction{.kind = InstructionKind::IterNext, .destination = expression.binding,
                              .operands = {localOperand(iterator)}, .span = expression.span});
-            loop_targets_.push_back({exit, head});
+            loop_targets_.push_back(LoopTarget{.break_block = exit, .continue_block = head,
+                                                   .cleanup_local = expression.binding});
             (void)lowerExpr(*expression.operands.at(1));
             loop_targets_.pop_back();
+            if (isOpen()) {
+                const auto binding_operand = localOperand(expression.binding);
+                if (!binding_operand.type.isCopy() && !binding_operand.type.isReference()) {
+                    emit(Instruction{.kind = InstructionKind::DropIf, .name = "for binding",
+                                     .operands = {binding_operand}, .span = expression.span});
+                }
+            }
             gotoIfOpen(head, expression.span);
             switchTo(exit);
             return unitOperand();
@@ -469,14 +483,28 @@ void MirBuilder::lowerStmt(const hir::Stmt& statement) {
         case hir::StmtKind::Break: {
             if (!loop_targets_.empty()) {
                 if (statement.value) (void)lowerExpr(*statement.value);
-                terminate(Terminator{.kind = TerminatorKind::Goto, .target = loop_targets_.back().first,
+                if (loop_targets_.back().cleanup_local) {
+                    const auto cleanup = localOperand(*loop_targets_.back().cleanup_local);
+                    if (!cleanup.type.isCopy() && !cleanup.type.isReference()) {
+                        emit(Instruction{.kind = InstructionKind::DropIf, .name = "for binding",
+                                         .operands = {cleanup}, .span = statement.span});
+                    }
+                }
+                terminate(Terminator{.kind = TerminatorKind::Goto, .target = loop_targets_.back().break_block,
                                      .span = statement.span});
             }
             break;
         }
         case hir::StmtKind::Continue: {
             if (!loop_targets_.empty()) {
-                terminate(Terminator{.kind = TerminatorKind::Goto, .target = loop_targets_.back().second,
+                if (loop_targets_.back().cleanup_local) {
+                    const auto cleanup = localOperand(*loop_targets_.back().cleanup_local);
+                    if (!cleanup.type.isCopy() && !cleanup.type.isReference()) {
+                        emit(Instruction{.kind = InstructionKind::DropIf, .name = "for binding",
+                                         .operands = {cleanup}, .span = statement.span});
+                    }
+                }
+                terminate(Terminator{.kind = TerminatorKind::Goto, .target = loop_targets_.back().continue_block,
                                      .span = statement.span});
             }
             break;

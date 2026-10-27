@@ -99,6 +99,7 @@ std::vector<LocalId> consumedByInstruction(const Instruction& instruction) {
             break;
         case InstructionKind::StoreMember:
         case InstructionKind::StoreIndex:
+        case InstructionKind::StoreDeref:
             if (!instruction.operands.empty()) consume(instruction.operands.back());
             break;
         case InstructionKind::IterInit:
@@ -117,8 +118,10 @@ std::vector<LocalId> consumedByInstruction(const Instruction& instruction) {
         case InstructionKind::GetVariantField:
         case InstructionKind::IterHasNext:
         case InstructionKind::IterNext:
+            break;
         case InstructionKind::Drop:
         case InstructionKind::DropIf:
+            if (!instruction.operands.empty()) consume(instruction.operands.front());
             break;
     }
     return result;
@@ -231,21 +234,38 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
         }
     }
 
-    // Propagate loan identity through assignments of references.
+    // Propagate loan identity through reference values and borrow-carrying iterators.
+    // This is the MIR-level lifetime provenance used by NLL: a call such as
+    // `values.iter()` receives a temporary &Vec<T>, but the resulting iterator
+    // keeps that same loan alive until the iterator's last use.
     bool loan_changed = true;
     while (loan_changed) {
         loan_changed = false;
         for (const auto& block : function.blocks) {
             for (const auto& instruction : block.instructions) {
-                if (instruction.kind != InstructionKind::Assign || !instruction.destination || instruction.operands.empty()) continue;
+                if (!instruction.destination) continue;
                 const Local* destination = findLocal(function, *instruction.destination);
-                const auto& source = instruction.operands.front();
-                if (!destination || !destination->type.isReference() || source.kind != OperandKind::Local) continue;
-                const auto source_found = local_loans.find(source.local);
-                if (source_found == local_loans.end()) continue;
+                if (!destination || !destination->type.carriesBorrow()) continue;
+
+                std::size_t first_source = 0;
+                bool propagates = instruction.kind == InstructionKind::Assign ||
+                                  instruction.kind == InstructionKind::IterInit ||
+                                  instruction.kind == InstructionKind::IterNext;
+                if (instruction.kind == InstructionKind::Call) {
+                    propagates = true;
+                    first_source = 1; // operand 0 is the callee
+                }
+                if (!propagates) continue;
+
                 auto& target = local_loans[*instruction.destination];
                 const auto old_size = target.size();
-                target.insert(source_found->second.begin(), source_found->second.end());
+                for (std::size_t i = first_source; i < instruction.operands.size(); ++i) {
+                    const auto& source = instruction.operands[i];
+                    if (source.kind != OperandKind::Local) continue;
+                    const auto source_found = local_loans.find(source.local);
+                    if (source_found == local_loans.end()) continue;
+                    target.insert(source_found->second.begin(), source_found->second.end());
+                }
                 if (target.size() != old_size) loan_changed = true;
             }
         }
@@ -336,7 +356,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                     addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed");
                 }
             }
-            if ((instruction.kind == InstructionKind::StoreMember || instruction.kind == InstructionKind::StoreIndex) &&
+            if ((instruction.kind == InstructionKind::StoreMember || instruction.kind == InstructionKind::StoreIndex || instruction.kind == InstructionKind::StoreDeref) &&
                 !instruction.operands.empty() && instruction.operands.front().kind == OperandKind::Local) {
                 const auto root = instruction.operands.front().local;
                 if (hasLoanForRoot(active, root)) {

@@ -38,6 +38,7 @@ std::string instructionName(InstructionKind kind) {
         case InstructionKind::IterNext: return "iter.next";
         case InstructionKind::StoreMember: return "store.member";
         case InstructionKind::StoreIndex: return "store.index";
+        case InstructionKind::StoreDeref: return "store.deref";
         case InstructionKind::Drop: return "drop";
         case InstructionKind::DropIf: return "drop.if.init";
     }

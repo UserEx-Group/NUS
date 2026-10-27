@@ -29,6 +29,8 @@ enum class TypeKind {
     Bytes,
     Vec,
     VecIter,
+    VecRefIter,
+    VecMutIter,
     Option,
     Result,
     TypeParameter,
@@ -61,6 +63,7 @@ struct Type {
     [[nodiscard]] static Type range(Type element);
     [[nodiscard]] static Type vector(Type element);
     [[nodiscard]] static Type vectorIterator(Type element);
+    [[nodiscard]] static Type borrowedVectorIterator(Type element, bool is_mutable = false);
     [[nodiscard]] static Type option(Type element);
     [[nodiscard]] static Type result(Type ok_type, Type error_type);
     [[nodiscard]] static Type typeParameter(std::string name, std::vector<std::string> bounds = {});
@@ -79,6 +82,7 @@ struct Type {
     [[nodiscard]] bool isReference() const noexcept;
     [[nodiscard]] bool isCopy() const noexcept;
     [[nodiscard]] bool containsReference() const noexcept;
+    [[nodiscard]] bool carriesBorrow() const noexcept;
     [[nodiscard]] std::string name() const;
 };
 

@@ -148,6 +148,7 @@ private:
     [[nodiscard]] Type checkWhile(const ast::WhileExpr& expression);
     [[nodiscard]] Type checkLoop(const ast::LoopExpr& expression);
     [[nodiscard]] Type checkFor(const ast::ForExpr& expression);
+    [[nodiscard]] bool validateReferenceReturn(const ast::Expr& expression);
 
     void checkPattern(const ast::Pattern& pattern, const Type& scrutinee, std::unordered_set<std::string>& covered, bool& irrefutable);
     [[nodiscard]] const StructInfo* findStruct(const Type& type) const;
@@ -209,6 +210,7 @@ private:
     std::vector<std::vector<BorrowRecord>> temporary_borrow_frames_;
     bool persist_borrows_{false};
     bool lexical_ownership_checks_{false};
+    std::unordered_set<std::string> return_reference_roots_;
 };
 
 } // namespace nus::sema

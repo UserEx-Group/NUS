@@ -45,6 +45,7 @@ enum class InstructionKind {
     IterNext,
     StoreMember,
     StoreIndex,
+    StoreDeref,
     Drop,
     DropIf,
 };

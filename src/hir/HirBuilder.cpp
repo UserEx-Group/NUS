@@ -246,7 +246,8 @@ ExprPtr HirBuilder::lowerExpr(const ast::Expr& expression) {
                 if (found != method_receivers_.end()) result->receiver = found->second;
             } else if (base.kind == sema::TypeKind::Vec) {
                 if (node.member == "push") result->receiver = ReceiverMode::Mutable;
-                else if (node.member == "len" || node.member == "get") result->receiver = ReceiverMode::Shared;
+                else if (node.member == "len" || node.member == "get" || node.member == "iter") result->receiver = ReceiverMode::Shared;
+                else if (node.member == "iter_mut") result->receiver = ReceiverMode::Mutable;
                 else if (node.member == "into_iter") result->receiver = ReceiverMode::Value;
             }
             result->operands.push_back(std::move(object));
@@ -398,8 +399,12 @@ ExprPtr HirBuilder::lowerExpr(const ast::Expr& expression) {
             sema::Type binding_type = unknownType();
             if (iterable->type.kind == sema::TypeKind::Range || iterable->type.kind == sema::TypeKind::Array ||
                 iterable->type.kind == sema::TypeKind::Slice || iterable->type.kind == sema::TypeKind::Vec ||
-                iterable->type.kind == sema::TypeKind::VecIter) {
-                if (iterable->type.element) binding_type = *iterable->type.element;
+                iterable->type.kind == sema::TypeKind::VecIter || iterable->type.kind == sema::TypeKind::VecRefIter || iterable->type.kind == sema::TypeKind::VecMutIter) {
+                if (iterable->type.element) {
+                    if (iterable->type.kind == sema::TypeKind::VecRefIter) binding_type = sema::Type::reference(*iterable->type.element, false);
+                    else if (iterable->type.kind == sema::TypeKind::VecMutIter) binding_type = sema::Type::reference(*iterable->type.element, true);
+                    else binding_type = *iterable->type.element;
+                }
             } else if (iterable->type.kind == sema::TypeKind::Bytes) {
                 binding_type = sema::Type::simple(sema::TypeKind::U8);
             }
@@ -485,6 +490,10 @@ sema::Type HirBuilder::lowerTypeRef(const ast::TypeRef& type) const {
         base = sema::Type::vector(lowerTypeRef(type.generic_arguments.front()));
     } else if (name == "VecIter" && type.generic_arguments.size() == 1) {
         base = sema::Type::vectorIterator(lowerTypeRef(type.generic_arguments.front()));
+    } else if (name == "VecRefIter" && type.generic_arguments.size() == 1) {
+        base = sema::Type::borrowedVectorIterator(lowerTypeRef(type.generic_arguments.front()), false);
+    } else if (name == "VecMutIter" && type.generic_arguments.size() == 1) {
+        base = sema::Type::borrowedVectorIterator(lowerTypeRef(type.generic_arguments.front()), true);
     } else if (name == "Option" && type.generic_arguments.size() == 1) {
         base = sema::Type::option(lowerTypeRef(type.generic_arguments.front()));
     } else if (name == "Result" && type.generic_arguments.size() == 2) {
@@ -505,6 +514,8 @@ sema::Type HirBuilder::substituteType(const sema::Type& type) const {
     if (type.kind == sema::TypeKind::Reference && type.element) return sema::Type::reference(substituteType(*type.element), type.mutable_reference);
     if (type.kind == sema::TypeKind::Vec && type.element) return sema::Type::vector(substituteType(*type.element));
     if (type.kind == sema::TypeKind::VecIter && type.element) return sema::Type::vectorIterator(substituteType(*type.element));
+    if (type.kind == sema::TypeKind::VecRefIter && type.element) return sema::Type::borrowedVectorIterator(substituteType(*type.element), false);
+    if (type.kind == sema::TypeKind::VecMutIter && type.element) return sema::Type::borrowedVectorIterator(substituteType(*type.element), true);
     if (type.kind == sema::TypeKind::Option && type.element) return sema::Type::option(substituteType(*type.element));
     if (type.kind == sema::TypeKind::Array && type.element) return sema::Type::array(substituteType(*type.element), type.array_length);
     if (type.kind == sema::TypeKind::Slice && type.element) return sema::Type::slice(substituteType(*type.element));

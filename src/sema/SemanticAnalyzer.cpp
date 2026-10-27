@@ -171,6 +171,7 @@ void SemanticAnalyzer::reset() {
     borrow_scopes_.emplace_back();
     temporary_borrow_frames_.clear();
     persist_borrows_ = false;
+    return_reference_roots_.clear();
 }
 
 void SemanticAnalyzer::analyze(const ast::SourceFile& file) {
@@ -552,7 +553,17 @@ void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
         for (const auto& parameter : function.parameters) parameters.push_back(resolveType(parameter.type));
         const Type result = function.return_type ? resolveType(*function.return_type) : unitType();
         if (function.return_type && result.containsReference()) {
-            error(function.return_type->span, "returning references is not supported until lifetime inference is implemented");
+            if (!result.isReference()) {
+                error(function.return_type->span, "references nested inside returned aggregates require named lifetimes and are not supported yet");
+            } else {
+                std::size_t borrowed_inputs = 0;
+                for (const auto& parameter_type : parameters) if (parameter_type.isReference()) ++borrowed_inputs;
+                if (borrowed_inputs != 1) {
+                    error(function.return_type->span, borrowed_inputs == 0
+                        ? "cannot return a reference without a borrowed input"
+                        : "cannot elide output lifetime with multiple borrowed inputs; named lifetimes are not supported yet");
+                }
+            }
         }
         Type signature = Type::function(std::move(parameters), result);
         function_signatures_.insert_or_assign(&function, signature);
@@ -625,7 +636,7 @@ void SemanticAnalyzer::collectMethods(const ast::SourceFile& file) {
             concrete_struct = findStruct(target_type);
         }
         if (!implementation.trait && implementation.generic_parameters.empty() && !target_type.isStruct()) {
-            error(implementation.target.span, "inherent methods on built-in types require a generic impl block in milestone 13");
+            error(implementation.target.span, "inherent methods on built-in types require a generic impl block");
         }
 
         for (const auto& method : implementation.methods) {
@@ -642,7 +653,17 @@ void SemanticAnalyzer::collectMethods(const ast::SourceFile& file) {
             for (const auto& parameter : method.parameters) parameters.push_back(resolveType(parameter.type));
             const Type result = method.return_type ? resolveType(*method.return_type) : unitType();
             if (method.return_type && result.containsReference()) {
-                error(method.return_type->span, "returning references is not supported until lifetime inference is implemented");
+                if (!result.isReference()) {
+                    error(method.return_type->span, "references nested inside returned aggregates require named lifetimes and are not supported yet");
+                } else if (method.receiver != ast::ReceiverKind::Reference && method.receiver != ast::ReceiverKind::MutableReference) {
+                    std::size_t borrowed_inputs = 0;
+                    for (const auto& parameter_type : parameters) if (parameter_type.isReference()) ++borrowed_inputs;
+                    if (borrowed_inputs != 1) {
+                        error(method.return_type->span, borrowed_inputs == 0
+                            ? "cannot return a reference without a borrowed input"
+                            : "cannot elide output lifetime with multiple borrowed inputs; named lifetimes are not supported yet");
+                    }
+                }
             }
             Type signature = Type::function(std::move(parameters), result);
             function_signatures_.insert_or_assign(&method, signature);
@@ -684,6 +705,12 @@ void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
                                : Type::function({}, unitType());
     current_return_type_ = signature.return_type ? *signature.return_type : unitType();
     loop_depth_ = 0;
+    return_reference_roots_.clear();
+    if (current_return_type_.isReference()) {
+        for (std::size_t i = 0; i < function.parameters.size() && i < signature.parameters.size(); ++i) {
+            if (signature.parameters[i].isReference()) return_reference_roots_.insert(function.parameters[i].name);
+        }
+    }
     pushScope();
 
     for (std::size_t index = 0; index < function.parameters.size(); ++index) {
@@ -705,6 +732,8 @@ void SemanticAnalyzer::analyzeFunction(const ast::FunctionDecl& function) {
         error(function.body->tail_expression->span,
               "function `" + function.name + "` returns `" + body_type.name() +
               "` but `" + current_return_type_.name() + "` is required");
+    } else if (function.body->tail_expression && current_return_type_.isReference()) {
+        (void)validateReferenceReturn(*function.body->tail_expression);
     }
 
     popScope();
@@ -723,6 +752,16 @@ void SemanticAnalyzer::analyzeMethod(const Type& target_type, const ast::Functio
                                : Type::function({}, unitType());
     current_return_type_ = signature.return_type ? *signature.return_type : unitType();
     loop_depth_ = 0;
+    return_reference_roots_.clear();
+    if (current_return_type_.isReference()) {
+        if (method.receiver == ast::ReceiverKind::Reference || method.receiver == ast::ReceiverKind::MutableReference) {
+            return_reference_roots_.insert("self");
+        } else {
+            for (std::size_t i = 0; i < method.parameters.size() && i < signature.parameters.size(); ++i) {
+                if (signature.parameters[i].isReference()) return_reference_roots_.insert(method.parameters[i].name);
+            }
+        }
+    }
     pushScope();
 
     if (method.receiver != ast::ReceiverKind::None) {
@@ -763,6 +802,9 @@ void SemanticAnalyzer::analyzeMethod(const Type& target_type, const ast::Functio
               "method `" + method.name + "` returns `" + body_type.name() +
               "` but `" + current_return_type_.name() + "` is required");
     }
+    else if (method.body->tail_expression && current_return_type_.isReference()) {
+        (void)validateReferenceReturn(*method.body->tail_expression);
+    }
 
     popScope();
     generic_type_environment_.clear();
@@ -789,11 +831,14 @@ Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
         }
         base = Type::vector(resolveType(type_ref.generic_arguments.front()));
     } else if (base_name == "VecIter") {
-        if (type_ref.generic_arguments.size() != 1) {
-            error(type_ref.span, "`VecIter` expects exactly one type argument");
-            return errorType();
-        }
+        if (type_ref.generic_arguments.size() != 1) { error(type_ref.span, "`VecIter` expects exactly one type argument"); return errorType(); }
         base = Type::vectorIterator(resolveType(type_ref.generic_arguments.front()));
+    } else if (base_name == "VecRefIter") {
+        if (type_ref.generic_arguments.size() != 1) { error(type_ref.span, "`VecRefIter` expects exactly one type argument"); return errorType(); }
+        base = Type::borrowedVectorIterator(resolveType(type_ref.generic_arguments.front()), false);
+    } else if (base_name == "VecMutIter") {
+        if (type_ref.generic_arguments.size() != 1) { error(type_ref.span, "`VecMutIter` expects exactly one type argument"); return errorType(); }
+        base = Type::borrowedVectorIterator(resolveType(type_ref.generic_arguments.front()), true);
     } else if (base_name == "Option") {
         if (type_ref.generic_arguments.size() != 1) {
             error(type_ref.span, "`Option` expects exactly one type argument");
@@ -865,6 +910,10 @@ Type SemanticAnalyzer::resolveTraitType(const ast::TypeRef& type_ref, const Type
             base = Type::vector(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types));
         } else if (name == "VecIter" && type_ref.generic_arguments.size() == 1) {
             base = Type::vectorIterator(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types));
+        } else if (name == "VecRefIter" && type_ref.generic_arguments.size() == 1) {
+            base = Type::borrowedVectorIterator(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types), false);
+        } else if (name == "VecMutIter" && type_ref.generic_arguments.size() == 1) {
+            base = Type::borrowedVectorIterator(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types), true);
         } else if (name == "Option" && type_ref.generic_arguments.size() == 1) {
             base = Type::option(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types));
         } else if (name == "Result" && type_ref.generic_arguments.size() == 2) {
@@ -899,6 +948,8 @@ Type SemanticAnalyzer::instantiateType(const Type& type, const std::unordered_ma
     }
     if (type.kind == TypeKind::Vec && type.element) return Type::vector(instantiateType(*type.element, substitutions));
     if (type.kind == TypeKind::VecIter && type.element) return Type::vectorIterator(instantiateType(*type.element, substitutions));
+    if (type.kind == TypeKind::VecRefIter && type.element) return Type::borrowedVectorIterator(instantiateType(*type.element, substitutions), false);
+    if (type.kind == TypeKind::VecMutIter && type.element) return Type::borrowedVectorIterator(instantiateType(*type.element, substitutions), true);
     if (type.kind == TypeKind::Option && type.element) return Type::option(instantiateType(*type.element, substitutions));
     if (type.kind == TypeKind::Array && type.element) return Type::array(instantiateType(*type.element, substitutions), type.array_length);
     if (type.kind == TypeKind::Slice && type.element) return Type::slice(instantiateType(*type.element, substitutions));
@@ -941,6 +992,8 @@ bool SemanticAnalyzer::inferGeneric(const Type& pattern, const Type& actual,
             return inferGeneric(*pattern.element, *actual.element, substitutions);
         case TypeKind::Vec:
         case TypeKind::VecIter:
+        case TypeKind::VecRefIter:
+        case TypeKind::VecMutIter:
         case TypeKind::Option:
         case TypeKind::Array:
         case TypeKind::Slice:
@@ -1151,6 +1204,7 @@ void SemanticAnalyzer::checkStatement(const ast::Stmt& statement) {
                       "return type mismatch: expected `" + current_return_type_.name() +
                       "`, found `" + actual.name() + "`");
             } else {
+                if (current_return_type_.isReference()) (void)validateReferenceReturn(*ret.value);
                 consumeValue(*ret.value, actual, "return value");
             }
             break;
@@ -1524,7 +1578,7 @@ Type SemanticAnalyzer::checkMethodCall(const ast::CallExpr& expression, const as
     const Type object_type = checkExpr(*member.object);
     const Type base_object = dereferenceForMember(object_type);
     if (base_object.kind == TypeKind::Vec &&
-        (member.member == "push" || member.member == "len" || member.member == "get" || member.member == "into_iter")) {
+        (member.member == "push" || member.member == "len" || member.member == "get" || member.member == "into_iter" || member.member == "iter" || member.member == "iter_mut")) {
         return checkVecMethodCall(expression, member, object_type);
     }
     for (const auto& generic_method : generic_methods_) {
@@ -1769,6 +1823,24 @@ Type SemanticAnalyzer::checkVecMethodCall(const ast::CallExpr& expression, const
             }
         }
         result = element;
+    } else if (member.member == "iter") {
+        requireSharedReceiver();
+        signature = Type::function({}, Type::borrowedVectorIterator(element, false));
+        target = "__builtin_vec_iter$" + element.name();
+        if (!expression.arguments.empty()) {
+            error(expression.span, "method `iter` expects 0 arguments, found " + std::to_string(expression.arguments.size()));
+            for (const auto& argument : expression.arguments) (void)checkExpr(*argument);
+        }
+        result = Type::borrowedVectorIterator(element, false);
+    } else if (member.member == "iter_mut") {
+        requireMutableReceiver();
+        signature = Type::function({}, Type::borrowedVectorIterator(element, true));
+        target = "__builtin_vec_iter_mut$" + element.name();
+        if (!expression.arguments.empty()) {
+            error(expression.span, "method `iter_mut` expects 0 arguments, found " + std::to_string(expression.arguments.size()));
+            for (const auto& argument : expression.arguments) (void)checkExpr(*argument);
+        }
+        result = Type::borrowedVectorIterator(element, true);
     } else if (member.member == "into_iter") {
         signature = Type::function({}, Type::vectorIterator(element));
         target = "__builtin_vec_into_iter$" + element.name();
@@ -2142,15 +2214,25 @@ Type SemanticAnalyzer::checkLoop(const ast::LoopExpr& expression) {
     return unitType();
 }
 
+bool SemanticAnalyzer::validateReferenceReturn(const ast::Expr& expression) {
+    if (!current_return_type_.isReference()) return true;
+    if (expression.kind == ast::ExprKind::Identifier) {
+        const auto& identifier = static_cast<const ast::IdentifierExpr&>(expression);
+        if (return_reference_roots_.contains(identifier.name)) return true;
+    }
+    error(expression.span, "returned reference does not originate from the elided borrowed input");
+    return false;
+}
+
 Type SemanticAnalyzer::checkFor(const ast::ForExpr& expression) {
     const Type iterable = checkExpr(*expression.iterable);
     Type binding_type = errorType();
     if (iterable.kind == TypeKind::Range || iterable.kind == TypeKind::Array || iterable.kind == TypeKind::Slice ||
-        iterable.kind == TypeKind::Vec || iterable.kind == TypeKind::VecIter) {
-        if (iterable.element) binding_type = *iterable.element;
-        if ((iterable.kind == TypeKind::Vec || iterable.kind == TypeKind::VecIter) &&
-            !binding_type.isError() && !binding_type.isCopy()) {
-            error(expression.iterable->span, "for-loop iteration over Vec currently requires a Copy element type; non-Copy per-iteration drop is not implemented yet");
+        iterable.kind == TypeKind::Vec || iterable.kind == TypeKind::VecIter || iterable.kind == TypeKind::VecRefIter || iterable.kind == TypeKind::VecMutIter) {
+        if (iterable.element) {
+            if (iterable.kind == TypeKind::VecRefIter) binding_type = Type::reference(*iterable.element, false);
+            else if (iterable.kind == TypeKind::VecMutIter) binding_type = Type::reference(*iterable.element, true);
+            else binding_type = *iterable.element;
         }
     } else if (iterable.kind == TypeKind::Bytes) {
         binding_type = Type::simple(TypeKind::U8);

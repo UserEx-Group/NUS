@@ -32,7 +32,12 @@ private:
 
     Function* function_{nullptr};
     BlockId current_{0};
-    std::vector<std::pair<BlockId, BlockId>> loop_targets_; // break, continue
+    struct LoopTarget {
+        BlockId break_block{InvalidBlockId};
+        BlockId continue_block{InvalidBlockId};
+        std::optional<LocalId> cleanup_local;
+    };
+    std::vector<LoopTarget> loop_targets_;
 };
 
 } // namespace nus::mir

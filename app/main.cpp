@@ -117,9 +117,13 @@ int main(int argc, char** argv) {
             const nus::codegen::LayoutEngine layouts(mir, target);
             const auto string_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::String));
             const auto vec_layout = layouts.layoutOf(nus::sema::Type::vector(nus::sema::Type::simple(nus::sema::TypeKind::I32)));
+            const auto ref_iter_layout = layouts.layoutOf(nus::sema::Type::borrowedVectorIterator(nus::sema::Type::simple(nus::sema::TypeKind::I32), false));
+            const auto mut_iter_layout = layouts.layoutOf(nus::sema::Type::borrowedVectorIterator(nus::sema::Type::simple(nus::sema::TypeKind::I32), true));
             std::cout << "target " << target.description() << '\n';
             std::cout << "string size=" << string_layout.size << " align=" << string_layout.alignment << '\n';
             std::cout << "Vec<i32> size=" << vec_layout.size << " align=" << vec_layout.alignment << '\n';
+            std::cout << "VecRefIter<i32> size=" << ref_iter_layout.size << " align=" << ref_iter_layout.alignment << '\n';
+            std::cout << "VecMutIter<i32> size=" << mut_iter_layout.size << " align=" << mut_iter_layout.alignment << '\n';
             for (const auto& structure : mir.structs) {
                 const auto layout = layouts.layoutOfStruct(structure.name);
                 std::cout << "struct " << layout.name << " size=" << layout.layout.size

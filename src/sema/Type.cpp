@@ -62,6 +62,13 @@ Type Type::vectorIterator(Type element_type) {
     return type;
 }
 
+Type Type::borrowedVectorIterator(Type element_type, bool is_mutable) {
+    Type type;
+    type.kind = is_mutable ? TypeKind::VecMutIter : TypeKind::VecRefIter;
+    type.element = std::make_shared<Type>(std::move(element_type));
+    return type;
+}
+
 Type Type::option(Type element_type) {
     Type type;
     type.kind = TypeKind::Option;
@@ -203,6 +210,8 @@ bool Type::isCopy() const noexcept {
         case TypeKind::Bytes:
         case TypeKind::Vec:
         case TypeKind::VecIter:
+        case TypeKind::VecRefIter:
+        case TypeKind::VecMutIter:
         case TypeKind::Struct:
         case TypeKind::Enum:
             return false;
@@ -211,8 +220,8 @@ bool Type::isCopy() const noexcept {
 }
 
 bool Type::containsReference() const noexcept {
-    if (kind == TypeKind::Reference) return true;
-    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec || kind == TypeKind::VecIter || kind == TypeKind::Option) && element) {
+    if (kind == TypeKind::Reference || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter) return true;
+    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec || kind == TypeKind::VecIter || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter || kind == TypeKind::Option) && element) {
         return element->containsReference();
     }
     if (kind == TypeKind::Result) {
@@ -225,6 +234,11 @@ bool Type::containsReference() const noexcept {
         return return_type && return_type->containsReference();
     }
     return false;
+}
+
+
+bool Type::carriesBorrow() const noexcept {
+    return kind == TypeKind::Reference || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter;
 }
 
 std::string Type::name() const {
@@ -252,6 +266,10 @@ std::string Type::name() const {
             return "Vec<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::VecIter:
             return "VecIter<" + (element ? element->name() : std::string("<unknown>")) + ">";
+        case TypeKind::VecRefIter:
+            return "VecRefIter<" + (element ? element->name() : std::string("<unknown>")) + ">";
+        case TypeKind::VecMutIter:
+            return "VecMutIter<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Option:
             return "Option<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Result:
@@ -304,6 +322,8 @@ bool operator==(const Type& lhs, const Type& rhs) {
         case TypeKind::Range:
         case TypeKind::Vec:
         case TypeKind::VecIter:
+        case TypeKind::VecRefIter:
+        case TypeKind::VecMutIter:
         case TypeKind::Option:
             if (!lhs.element || !rhs.element) return lhs.element == rhs.element;
             return *lhs.element == *rhs.element;
