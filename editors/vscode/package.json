@@ -2,7 +2,7 @@
   "name": "nus-language-support",
   "displayName": "NUS Language Support",
   "description": "Language support for NUS — Network Universal Syntax.",
-  "version": "0.16.5",
+  "version": "0.17.0",
   "publisher": "userex",
   "engines": {
     "vscode": "^1.32.0"
@@ -27,8 +27,14 @@
     "languages": [
       {
         "id": "nus",
-        "aliases": ["NUS", "nus", "Network Universal Syntax"],
-        "extensions": [".nus"],
+        "aliases": [
+          "NUS",
+          "nus",
+          "Network Universal Syntax"
+        ],
+        "extensions": [
+          ".nus"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -86,7 +92,11 @@
         },
         "nus.revealCompilerOutput": {
           "type": "string",
-          "enum": ["never", "onError", "always"],
+          "enum": [
+            "never",
+            "onError",
+            "always"
+          ],
           "default": "onError",
           "description": "When to reveal the NUS compiler output channel."
         }

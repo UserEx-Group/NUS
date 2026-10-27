@@ -37,3 +37,17 @@ fn main() {
 
     print(socket_port(&address), code, r#"raw string"#);
 }
+
+async fn async_smoke(value: i32) -> i32 {
+    let next = value + 1;
+    next
+}
+
+fn reactor_smoke(address: &SocketAddr) -> Result<usize, NetworkError> {
+    let mut listener = tcp_listen(address, 8, true)?;
+    let _nonblocking = tcp_listener_set_nonblocking(&mut listener, true)?;
+    let mut reactor = reactor_new()?;
+    let _registered = reactor_register_listener(&mut reactor, &listener, 9usize)?;
+    let _ready = reactor_wait(&mut reactor, 0)?;
+    ok::<usize, NetworkError>(reactor_len(&reactor))
+}

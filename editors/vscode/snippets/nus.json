@@ -129,5 +129,34 @@
       "${0}"
     ],
     "description": "Bind a UDP socket"
+  },
+  "Async function": {
+    "prefix": "asyncfn",
+    "body": [
+      "async fn ${1:name}(${2}) -> ${3:i32} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Declare an eager Future-returning async function"
+  },
+  "Await future": {
+    "prefix": "await",
+    "body": [
+      "let ${1:value} = await ${2:future};",
+      "${0}"
+    ],
+    "description": "Await a Future<T> inside async fn"
+  },
+  "Reactor listener": {
+    "prefix": "reactorlisten",
+    "body": [
+      "let mut ${1:listener} = tcp_listen(&${2:address}, ${3:128}, true)?;",
+      "let _nonblocking = tcp_listener_set_nonblocking(&mut ${1:listener}, true)?;",
+      "let mut ${4:reactor} = reactor_new()?;",
+      "let _registered = reactor_register_listener(&mut ${4:reactor}, &${1:listener}, ${5:1usize})?;",
+      "let ${6:ready} = reactor_wait(&mut ${4:reactor}, ${7:0})?;",
+      "${0}"
+    ],
+    "description": "Create a non-blocking TCP listener and register it with Reactor"
   }
 }
