@@ -56,6 +56,10 @@ int main() {
     if (listener_layout.size != 8 || listener_layout.alignment != 8) fail("TcpListener ABI mismatch");
     const auto udp_layout = layouts.layoutOf(Type::simple(TypeKind::UdpSocket));
     if (udp_layout.size != 8 || udp_layout.alignment != 8) fail("UdpSocket ABI mismatch");
+    const auto reactor_layout = layouts.layoutOf(Type::simple(TypeKind::Reactor));
+    if (reactor_layout.size != 24 || reactor_layout.alignment != 8) fail("Reactor ABI mismatch");
+    const auto future_i32_layout = layouts.layoutOf(Type::future(Type::simple(TypeKind::I32)));
+    if (future_i32_layout.size != 8 || future_i32_layout.alignment != 4) fail("Future<i32> ABI mismatch");
 
     const auto packet_layout = layouts.layoutOfStruct("Packet");
     if (packet_layout.layout.size != 16 || packet_layout.layout.alignment != 8) fail("Packet layout mismatch");
