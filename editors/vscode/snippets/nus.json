@@ -137,7 +137,7 @@
       "    ${0}",
       "}"
     ],
-    "description": "Declare an eager Future-returning async function"
+    "description": "Declare a resumable Future-returning async function"
   },
   "Await future": {
     "prefix": "await",
@@ -158,5 +158,41 @@
       "${0}"
     ],
     "description": "Create a non-blocking TCP listener and register it with Reactor"
+  },
+  "Yield now": {
+    "prefix": "yieldnow",
+    "body": [
+      "await yield_now();",
+      "${0}"
+    ],
+    "description": "Cooperatively suspend the current async function once"
+  },
+  "Executor": {
+    "prefix": "executor",
+    "body": [
+      "let mut ${1:executor} = executor_new();",
+      "executor_spawn(&mut ${1:executor}, ${2:task}());",
+      "executor_run(&mut ${1:executor});",
+      "${0}"
+    ],
+    "description": "Create a cooperative executor, spawn a task and run it"
+  },
+  "Async TCP accept": {
+    "prefix": "tcpacceptasync",
+    "body": [
+      "let ${1:accepted} = await tcp_accept_async(&mut ${2:listener});",
+      "let ${3:stream} = ${1:accepted}?;",
+      "${0}"
+    ],
+    "description": "Await a non-blocking TCP accept Future"
+  },
+  "Async TCP receive": {
+    "prefix": "tcpreceiveasync",
+    "body": [
+      "let ${1:received} = await tcp_receive_async(&mut ${2:stream}, ${3:4096usize});",
+      "let ${4:buffer} = ${1:received}?;",
+      "${0}"
+    ],
+    "description": "Await a non-blocking TCP receive Future"
   }
 }

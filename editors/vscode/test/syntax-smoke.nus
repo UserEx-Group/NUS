@@ -39,8 +39,25 @@ fn main() {
 }
 
 async fn async_smoke(value: i32) -> i32 {
+    await yield_now();
     let next = value + 1;
     next
+}
+
+async fn async_accept_smoke(listener: &mut TcpListener) -> Result<i32, NetworkError> {
+    let accepted = await tcp_accept_async(listener);
+    let stream = accepted?;
+    ok::<i32, NetworkError>(1)
+}
+
+async fn background_smoke() {
+    await yield_now();
+}
+
+fn executor_smoke() {
+    let mut executor = executor_new();
+    executor_spawn(&mut executor, background_smoke());
+    executor_run(&mut executor);
 }
 
 fn reactor_smoke(address: &SocketAddr) -> Result<usize, NetworkError> {
