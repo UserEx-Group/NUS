@@ -34,6 +34,7 @@ enum class TypeKind {
     TcpListener,
     UdpSocket,
     Reactor,
+    Executor,
     Future,
     Vec,
     VecIter,

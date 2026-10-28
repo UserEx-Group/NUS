@@ -42,6 +42,7 @@ std::optional<TypeKind> simpleTypeKind(std::string_view name) {
     if (name == "TcpListener") return TypeKind::TcpListener;
     if (name == "UdpSocket") return TypeKind::UdpSocket;
     if (name == "Reactor") return TypeKind::Reactor;
+    if (name == "Executor") return TypeKind::Executor;
     return std::nullopt;
 }
 
@@ -261,6 +262,7 @@ void SemanticAnalyzer::registerBuiltins() {
     const Type tcp_listener_type = Type::simple(TypeKind::TcpListener);
     const Type udp_socket_type = Type::simple(TypeKind::UdpSocket);
     const Type reactor_type = Type::simple(TypeKind::Reactor);
+    const Type executor_type = Type::simple(TypeKind::Executor);
     const Type bytes_buffer_type = Type::vector(u8_type);
     const Type vec_i32 = Type::vector(i32_type);
 
@@ -306,6 +308,17 @@ void SemanticAnalyzer::registerBuiltins() {
     builtin("reactor_event_token", {Type::reference(reactor_type), usize_type}, usize_type);
     builtin("reactor_event_readable", {Type::reference(reactor_type), usize_type}, Type::simple(TypeKind::Bool));
     builtin("reactor_event_writable", {Type::reference(reactor_type), usize_type}, Type::simple(TypeKind::Bool));
+    builtin("yield_now", {}, Type::future(unitType()));
+    builtin("executor_new", {}, executor_type);
+    builtin("executor_spawn", {Type::reference(executor_type, true), Type::future(unitType())}, unitType());
+    builtin("executor_run", {Type::reference(executor_type, true)}, unitType());
+    // Milestone 18: socket operations represented as genuinely suspendable futures.
+    builtin("tcp_accept_async", {Type::reference(tcp_listener_type, true)},
+            Type::future(Type::result(tcp_stream_type, network_error_type)));
+    builtin("tcp_receive_async", {Type::reference(tcp_stream_type, true), usize_type},
+            Type::future(Type::result(bytes_buffer_type, network_error_type)));
+    builtin("tcp_send_async", {Type::reference(tcp_stream_type, true), Type::reference(bytes_buffer_type)},
+            Type::future(Type::result(usize_type, network_error_type)));
     // Compatibility shims from milestone 10. New code should use the generic builtins below.
     builtin("vec_new_i32", {}, vec_i32);
     builtin("vec_push_i32", {Type::reference(vec_i32, true), i32_type}, unitType());
@@ -616,7 +629,7 @@ void SemanticAnalyzer::collectFunctions(const ast::SourceFile& file) {
         }
         if (function.is_async && result.containsReference()) {
             error(function.return_type ? function.return_type->span : function.span,
-                  "async functions cannot return borrowed references in milestone 17");
+                  "async functions cannot return borrowed references in milestone 18");
         }
         const Type public_result = function.is_async ? Type::future(result) : result;
         Type signature = Type::function(std::move(parameters), public_result);
@@ -813,7 +826,7 @@ void SemanticAnalyzer::analyzeMethod(const Type& target_type, const ast::Functio
                                ? signature_it->second
                                : Type::function({}, unitType());
     current_async_function_ = false;
-    if (method.is_async) error(method.span, "async methods are not supported in milestone 17 yet");
+    if (method.is_async) error(method.span, "async methods are not supported in milestone 18 yet");
     current_return_type_ = signature.return_type ? *signature.return_type : unitType();
     loop_depth_ = 0;
     return_reference_roots_.clear();

@@ -216,7 +216,8 @@ bool Type::isCopy() const noexcept {
         case TypeKind::Result:
             return generic_arguments.size() == 2 && generic_arguments[0].isCopy() && generic_arguments[1].isCopy();
         case TypeKind::Future:
-            return element && element->isCopy();
+            // Futures own a suspended coroutine frame in milestone 18 and are never Copy.
+            return false;
         case TypeKind::TypeParameter:
             return std::find(trait_bounds.begin(), trait_bounds.end(), "Copy") != trait_bounds.end();
         case TypeKind::String:
@@ -229,6 +230,7 @@ bool Type::isCopy() const noexcept {
         case TypeKind::TcpListener:
         case TypeKind::UdpSocket:
         case TypeKind::Reactor:
+        case TypeKind::Executor:
         case TypeKind::Struct:
         case TypeKind::Enum:
             return false;
@@ -256,7 +258,7 @@ bool Type::containsReference() const noexcept {
 
 bool Type::carriesBorrow() const noexcept {
     return kind == TypeKind::Reference || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter ||
-           kind == TypeKind::Reactor;
+           kind == TypeKind::Reactor || kind == TypeKind::Future;
 }
 
 std::string Type::name() const {
@@ -287,6 +289,7 @@ std::string Type::name() const {
         case TypeKind::TcpListener: return "TcpListener";
         case TypeKind::UdpSocket: return "UdpSocket";
         case TypeKind::Reactor: return "Reactor";
+        case TypeKind::Executor: return "Executor";
         case TypeKind::Future:
             return "Future<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Vec:

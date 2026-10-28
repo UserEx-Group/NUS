@@ -54,7 +54,8 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::TcpStream:
         case TypeKind::TcpListener:
         case TypeKind::UdpSocket: return {pointer, pointer};
-        case TypeKind::Reactor: return {pointer * 3U, pointer};
+        case TypeKind::Reactor:
+        case TypeKind::Executor: return {pointer * 3U, pointer};
         case TypeKind::String:
         case TypeKind::Vec: return {pointer * 3U, pointer};
         case TypeKind::SocketAddr: return {8, 4};
@@ -63,10 +64,16 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::VecMutIter: return {pointer * 3U, pointer};
         case TypeKind::Future: {
             if (!type.element) throw std::runtime_error("layout: malformed Future");
-            if (type.element->isUnit()) return {1, 1};
-            const auto payload = layoutOf(*type.element);
-            const std::size_t offset = alignTo(1, payload.alignment);
-            return {alignTo(offset + payload.size, payload.alignment), payload.alignment};
+            // M18 future ABI: ready flag, optional payload, frame, poll callback, destroy callback.
+            std::size_t offset = 1;
+            std::size_t alignment = pointer;
+            if (!type.element->isUnit()) {
+                const auto payload = layoutOf(*type.element);
+                offset = alignTo(offset, payload.alignment) + payload.size;
+                alignment = std::max(alignment, payload.alignment);
+            }
+            for (int i = 0; i < 3; ++i) offset = alignTo(offset, pointer) + pointer;
+            return {alignTo(offset, alignment), alignment};
         }
         case TypeKind::Option: {
             if (!type.element) throw std::runtime_error("layout: malformed Option");

@@ -51,6 +51,10 @@ std::string enumSymbol(std::string_view name) {
     return "%nus.enum." + sanitize(name);
 }
 
+std::string asyncFrameSymbol(const mir::Function& function) {
+    return "%nus.async.frame." + sanitize(functionKey(function));
+}
+
 std::string removeUnderscores(std::string text) {
     text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
     return text;
@@ -168,6 +172,16 @@ public:
     void emit();
 
 private:
+    void emitSync();
+    void emitAsync();
+    void emitAsyncConstructor();
+    void emitAsyncPoll();
+    void emitAsyncDestroy();
+    [[nodiscard]] std::size_t asyncLocalField(mir::LocalId id) const;
+    [[nodiscard]] std::size_t asyncDropField(mir::LocalId id) const;
+    [[nodiscard]] std::size_t futureFrameField(const sema::Type& type) const { return type.element && type.element->isUnit() ? 1U : 2U; }
+    [[nodiscard]] std::size_t futurePollField(const sema::Type& type) const { return futureFrameField(type) + 1U; }
+    [[nodiscard]] std::size_t futureDropField(const sema::Type& type) const { return futureFrameField(type) + 2U; }
     [[nodiscard]] std::string next(std::string_view hint = "v") {
         return "%" + std::string(hint) + std::to_string(next_value_++);
     }
@@ -209,6 +223,9 @@ private:
     void builtinTcpSetTimeout(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinTcpSend(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinTcpReceive(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinTcpAcceptAsync(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinTcpReceiveAsync(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
+    void builtinTcpSendAsync(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinUdpBind(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinUdpSendTo(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
     void builtinUdpReceive(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments);
@@ -229,6 +246,9 @@ private:
     std::ostringstream& out_;
     std::size_t next_value_{0};
     std::size_t next_label_{0};
+    bool async_poll_mode_{false};
+    std::unordered_map<const mir::Instruction*, std::size_t> await_states_;
+    std::unordered_map<const mir::Instruction*, std::string> await_labels_;
 };
 
 class ModuleEmitter {
@@ -240,7 +260,7 @@ public:
 
     std::string run() {
         std::ostringstream out;
-        out << "; NUS LLVM IR - milestone 17\n";
+        out << "; NUS LLVM IR - milestone 18\n";
         out << "; target: " << target_.description() << "\n";
         if (!target_.triple.empty()) out << "target triple = \"" << target_.triple << "\"\n";
         out << "\n";
@@ -272,6 +292,7 @@ public:
             out << "declare i32 @closesocket(i64)\n";
             out << "declare i32 @ioctlsocket(i64, i32, ptr)\n";
             out << "declare i32 @WSAPoll(ptr, i32, i32)\n";
+            out << "declare void @Sleep(i32)\n";
         } else {
             out << "declare i32 @socket(i32, i32, i32)\n";
             out << "declare i32 @connect(i32, ptr, i32)\n";
@@ -293,6 +314,8 @@ public:
         emitNetworkInitHelper(out);
         emitNetworkErrorHelpers(out);
         emitReactorHelpers(out);
+        emitFutureRuntimeHelpers(out);
+        emitAsyncNetworkHelpers(out);
         emitAssertHelper(out);
         for (const auto& function : program_.functions) FunctionEmitter(*this, function, out).emit();
         emitMainWrapper(out);
@@ -326,10 +349,12 @@ public:
             case TypeKind::TcpListener: return "%nus.tcplistener";
             case TypeKind::UdpSocket: return "%nus.udpsocket";
             case TypeKind::Reactor: return "%nus.reactor";
+            case TypeKind::Executor: return "%nus.executor";
             case TypeKind::Future:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Future type");
-                if (type.element->isUnit()) return "{ i1 }";
-                return "{ i1, " + llvmType(*type.element) + " }";
+                // ready, optional payload, frame, poll(frame,out), destroy(frame)
+                if (type.element->isUnit()) return "{ i1, ptr, ptr, ptr }";
+                return "{ i1, " + llvmType(*type.element) + ", ptr, ptr, ptr }";
             case TypeKind::Vec:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Vec type");
                 return "{ ptr, " + usizeType() + ", " + usizeType() + " }";
@@ -445,6 +470,13 @@ private:
         out << "%nus.udpsocket = type { i64 }\n";
         out << "%nus.reactor.entry = type { i64, i16, i16, " << usizeType() << " }\n";
         out << "%nus.reactor = type { ptr, " << usizeType() << ", " << usizeType() << " }\n";
+        out << "%nus.task = type { ptr, ptr, ptr }\n";
+        out << "%nus.executor = type { ptr, " << usizeType() << ", " << usizeType() << " }\n";
+        out << "%nus.future.header = type { i32, i64, i16, ptr, i32 }\n";
+        out << "%nus.future.yield.frame = type { i32, i64, i16, ptr, i32, i1 }\n";
+        out << "%nus.future.accept.frame = type { i32, i64, i16, ptr, i32, i64 }\n";
+        out << "%nus.future.recv.frame = type { i32, i64, i16, ptr, i32, i64, " << usizeType() << " }\n";
+        out << "%nus.future.send.frame = type { i32, i64, i16, ptr, i32, i64, ptr, " << usizeType() << " }\n";
         if (windowsTarget()) out << "%nus.os.pollfd = type { i64, i16, i16 }\n";
         else out << "%nus.os.pollfd = type { i32, i16, i16 }\n";
         out << "%nus.hostent = type { ptr, ptr, i32, i32, ptr }\n";
@@ -462,6 +494,16 @@ private:
             out << enumSymbol(enumeration.name) << " = type { i32";
             for (const auto& variant : enumeration.variants) {
                 for (const auto& payload : variant.payloads) out << ", " << llvmType(payload);
+            }
+            out << " }\n";
+        }
+        for (const auto& function : program_.functions) {
+            if (!function.is_async) continue;
+            out << asyncFrameSymbol(function) << " = type { i32, i64, i16, ptr, i32";
+            for (const auto& local : function.locals) {
+                if (local.type.isUnit()) continue;
+                out << ", " << llvmType(local.type);
+                if (!local.type.isCopy() && !local.type.isReference()) out << ", i1";
             }
             out << " }\n";
         }
@@ -677,6 +719,369 @@ private:
         out << "  call void @free(ptr %fds)\n";
         out << "  ret i32 %rc\n";
         out << "}\n\n";
+    }
+
+    void emitFutureRuntimeHelpers(std::ostringstream& out) const {
+        const std::string usize = usizeType();
+        out << "define internal void @nus_future_wait(ptr %frame) {\n";
+        out << "entry:\n";
+        out << "  %handle.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 1\n";
+        out << "  %events.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 2\n";
+        out << "  %reactor.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 3\n";
+        out << "  %timeout.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 4\n";
+        out << "  %handle = load i64, ptr %handle.ptr\n";
+        out << "  %events = load i16, ptr %events.ptr\n";
+        out << "  %reactor = load ptr, ptr %reactor.ptr\n";
+        out << "  %timeout = load i32, ptr %timeout.ptr\n";
+        out << "  %has.reactor = icmp ne ptr %reactor, null\n";
+        out << "  br i1 %has.reactor, label %wait.reactor, label %check.handle\n";
+        out << "wait.reactor:\n";
+        out << "  %rr = call i32 @nus_reactor_wait(ptr %reactor, i32 %timeout)\n";
+        out << "  ret void\n";
+        out << "check.handle:\n";
+        out << "  %has.handle = icmp sge i64 %handle, 0\n";
+        out << "  br i1 %has.handle, label %wait.handle, label %idle\n";
+        out << "wait.handle:\n";
+        out << "  %fd = alloca %nus.os.pollfd\n";
+        out << "  %fd.handle = getelementptr inbounds %nus.os.pollfd, ptr %fd, i32 0, i32 0\n";
+        out << "  %fd.events = getelementptr inbounds %nus.os.pollfd, ptr %fd, i32 0, i32 1\n";
+        out << "  %fd.revents = getelementptr inbounds %nus.os.pollfd, ptr %fd, i32 0, i32 2\n";
+        if (windowsTarget()) {
+            out << "  store i64 %handle, ptr %fd.handle\n";
+        } else {
+            out << "  %handle32 = trunc i64 %handle to i32\n";
+            out << "  store i32 %handle32, ptr %fd.handle\n";
+        }
+        out << "  store i16 %events, ptr %fd.events\n";
+        out << "  store i16 0, ptr %fd.revents\n";
+        if (windowsTarget()) {
+            out << "  %prc = call i32 @WSAPoll(ptr %fd, i32 1, i32 %timeout)\n";
+        } else if (darwinTarget()) {
+            out << "  %prc = call i32 @poll(ptr %fd, i32 1, i32 %timeout)\n";
+        } else {
+            out << "  %prc = call i32 @poll(ptr %fd, " << usize << " 1, i32 %timeout)\n";
+        }
+        out << "  ret void\n";
+        out << "idle:\n";
+        if (windowsTarget()) {
+            out << "  call void @Sleep(i32 1)\n";
+        } else if (darwinTarget()) {
+            out << "  %irc = call i32 @poll(ptr null, i32 0, i32 1)\n";
+        } else {
+            out << "  %irc = call i32 @poll(ptr null, " << usize << " 0, i32 1)\n";
+        }
+        out << "  ret void\n";
+        out << "}\n\n";
+
+        out << "define internal i1 @nus_yield_poll(ptr %frame, ptr %out) {\n";
+        out << "entry:\n";
+        out << "  %state.ptr = getelementptr inbounds %nus.future.yield.frame, ptr %frame, i32 0, i32 0\n";
+        out << "  %state = load i32, ptr %state.ptr\n";
+        out << "  %first = icmp eq i32 %state, 0\n";
+        out << "  br i1 %first, label %pending, label %ready\n";
+        out << "pending:\n";
+        out << "  store i32 1, ptr %state.ptr\n";
+        out << "  ret i1 false\n";
+        out << "ready:\n";
+        out << "  ret i1 true\n";
+        out << "}\n\n";
+        out << "define internal void @nus_yield_drop(ptr %frame) {\nentry:\n  call void @free(ptr %frame)\n  ret void\n}\n\n";
+
+        out << "define internal void @nus_executor_wait(ptr %executor) {\n";
+        out << "entry:\n";
+        out << "  %data.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 0\n";
+        out << "  %len.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 1\n";
+        out << "  %data = load ptr, ptr %data.ptr\n";
+        out << "  %len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %empty = icmp eq " << usize << " %len, 0\n";
+        out << "  br i1 %empty, label %done, label %alloc\n";
+        out << "alloc:\n";
+        out << "  %one = getelementptr %nus.os.pollfd, ptr null, i32 1\n";
+        out << "  %stride = ptrtoint ptr %one to " << usize << "\n";
+        out << "  %bytes = mul " << usize << " %len, %stride\n";
+        out << "  %fds = call ptr @malloc(" << usize << " %bytes)\n";
+        out << "  %scan.i = alloca " << usize << "\n";
+        out << "  %poll.n = alloca " << usize << "\n";
+        out << "  %has.idle = alloca i1\n";
+        out << "  store " << usize << " 0, ptr %scan.i\n";
+        out << "  store " << usize << " 0, ptr %poll.n\n";
+        out << "  store i1 false, ptr %has.idle\n";
+        out << "  br label %scan.head\n";
+        out << "scan.head:\n";
+        out << "  %i = load " << usize << ", ptr %scan.i\n";
+        out << "  %more = icmp ult " << usize << " %i, %len\n";
+        out << "  br i1 %more, label %scan.body, label %wait.select\n";
+        out << "scan.body:\n";
+        out << "  %task = getelementptr inbounds %nus.task, ptr %data, " << usize << " %i\n";
+        out << "  %frame.ptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 0\n";
+        out << "  %frame = load ptr, ptr %frame.ptr\n";
+        out << "  %handle.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 1\n";
+        out << "  %events.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 2\n";
+        out << "  %handle = load i64, ptr %handle.ptr\n";
+        out << "  %events = load i16, ptr %events.ptr\n";
+        out << "  %has.handle = icmp sge i64 %handle, 0\n";
+        out << "  br i1 %has.handle, label %add.fd, label %mark.idle\n";
+        out << "mark.idle:\n";
+        out << "  store i1 true, ptr %has.idle\n";
+        out << "  br label %scan.next\n";
+        out << "add.fd:\n";
+        out << "  %n = load " << usize << ", ptr %poll.n\n";
+        out << "  %fd = getelementptr inbounds %nus.os.pollfd, ptr %fds, " << usize << " %n\n";
+        out << "  %fd.handle = getelementptr inbounds %nus.os.pollfd, ptr %fd, i32 0, i32 0\n";
+        out << "  %fd.events = getelementptr inbounds %nus.os.pollfd, ptr %fd, i32 0, i32 1\n";
+        out << "  %fd.revents = getelementptr inbounds %nus.os.pollfd, ptr %fd, i32 0, i32 2\n";
+        if (windowsTarget()) {
+            out << "  store i64 %handle, ptr %fd.handle\n";
+        } else {
+            out << "  %handle32 = trunc i64 %handle to i32\n";
+            out << "  store i32 %handle32, ptr %fd.handle\n";
+        }
+        out << "  store i16 %events, ptr %fd.events\n";
+        out << "  store i16 0, ptr %fd.revents\n";
+        out << "  %n.next = add " << usize << " %n, 1\n";
+        out << "  store " << usize << " %n.next, ptr %poll.n\n";
+        out << "  br label %scan.next\n";
+        out << "scan.next:\n";
+        out << "  %i.next = add " << usize << " %i, 1\n";
+        out << "  store " << usize << " %i.next, ptr %scan.i\n";
+        out << "  br label %scan.head\n";
+        out << "wait.select:\n";
+        out << "  %count = load " << usize << ", ptr %poll.n\n";
+        out << "  %idle = load i1, ptr %has.idle\n";
+        out << "  %has.fds = icmp ne " << usize << " %count, 0\n";
+        out << "  br i1 %has.fds, label %wait.fds, label %wait.idle\n";
+        out << "wait.fds:\n";
+        out << "  %timeout = select i1 %idle, i32 1, i32 -1\n";
+        if (windowsTarget()) {
+            out << "  %count32 = trunc " << usize << " %count to i32\n";
+            out << "  %prc = call i32 @WSAPoll(ptr %fds, i32 %count32, i32 %timeout)\n";
+        } else if (darwinTarget()) {
+            out << "  %count32 = trunc " << usize << " %count to i32\n";
+            out << "  %prc = call i32 @poll(ptr %fds, i32 %count32, i32 %timeout)\n";
+        } else {
+            out << "  %prc = call i32 @poll(ptr %fds, " << usize << " %count, i32 %timeout)\n";
+        }
+        out << "  br label %cleanup\n";
+        out << "wait.idle:\n";
+        if (windowsTarget()) out << "  call void @Sleep(i32 1)\n";
+        else if (darwinTarget()) out << "  %irc = call i32 @poll(ptr null, i32 0, i32 1)\n";
+        else out << "  %irc = call i32 @poll(ptr null, " << usize << " 0, i32 1)\n";
+        out << "  br label %cleanup\n";
+        out << "cleanup:\n  call void @free(ptr %fds)\n  br label %done\n";
+        out << "done:\n  ret void\n}\n\n";
+
+        out << "define internal void @nus_executor_run(ptr %executor) {\n";
+        out << "entry:\n  br label %outer\n";
+        out << "outer:\n";
+        out << "  %data.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 0\n";
+        out << "  %len.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 1\n";
+        out << "  %data = load ptr, ptr %data.ptr\n";
+        out << "  %len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %empty = icmp eq " << usize << " %len, 0\n";
+        out << "  br i1 %empty, label %done, label %scan.init\n";
+        out << "scan.init:\n  %i = alloca " << usize << "\n  store " << usize << " 0, ptr %i\n  br label %scan.head\n";
+        out << "scan.head:\n";
+        out << "  %idx = load " << usize << ", ptr %i\n";
+        out << "  %cur.len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %more = icmp ult " << usize << " %idx, %cur.len\n";
+        out << "  br i1 %more, label %scan.body, label %idle.first\n";
+        out << "scan.body:\n";
+        out << "  %task = getelementptr inbounds %nus.task, ptr %data, " << usize << " %idx\n";
+        out << "  %fptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 0\n";
+        out << "  %pptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 1\n";
+        out << "  %dptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 2\n";
+        out << "  %frame = load ptr, ptr %fptr\n  %poll = load ptr, ptr %pptr\n  %drop = load ptr, ptr %dptr\n";
+        out << "  %ready = call i1 %poll(ptr %frame, ptr null)\n";
+        out << "  br i1 %ready, label %task.done, label %task.pending\n";
+        out << "task.done:\n";
+        out << "  call void %drop(ptr %frame)\n";
+        out << "  %old.len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %new.len = sub " << usize << " %old.len, 1\n";
+        out << "  %is.last = icmp eq " << usize << " %idx, %new.len\n";
+        out << "  br i1 %is.last, label %shrink, label %swap\n";
+        out << "swap:\n";
+        out << "  %last = getelementptr inbounds %nus.task, ptr %data, " << usize << " %new.len\n";
+        out << "  %last.val = load %nus.task, ptr %last\n";
+        out << "  store %nus.task %last.val, ptr %task\n";
+        out << "  br label %shrink\n";
+        out << "shrink:\n  store " << usize << " %new.len, ptr %len.ptr\n  br label %scan.head\n";
+        out << "task.pending:\n";
+        out << "  %next = add " << usize << " %idx, 1\n  store " << usize << " %next, ptr %i\n  br label %scan.head\n";
+        out << "idle.first:\n";
+        out << "  %after.len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %after.empty = icmp eq " << usize << " %after.len, 0\n";
+        out << "  br i1 %after.empty, label %done, label %idle.wait\n";
+        out << "idle.wait:\n";
+        out << "  call void @nus_executor_wait(ptr %executor)\n";
+        out << "  br label %outer\n";
+        out << "done:\n  ret void\n}\n\n";
+    }
+
+    void emitAsyncNetworkHelpers(std::ostringstream& out) const {
+        const std::string usize = usizeType();
+        const int read_mask = windowsTarget() ? 0x0100 : 0x0001;
+        const int write_mask = windowsTarget() ? 0x0010 : 0x0004;
+        const int nonblock_flag = darwinTarget() ? 4 : 2048;
+
+        out << "define internal i32 @nus_socket_set_nonblocking(i64 %handle) {\n";
+        out << "entry:\n";
+        if (windowsTarget()) {
+            out << "  %mode = alloca i32\n";
+            out << "  store i32 1, ptr %mode\n";
+            out << "  %rc = call i32 @ioctlsocket(i64 %handle, i32 2147772030, ptr %mode)\n";
+            out << "  ret i32 %rc\n";
+        } else {
+            out << "  %fd = trunc i64 %handle to i32\n";
+            out << "  %flags = call i32 (i32, i32, ...) @fcntl(i32 %fd, i32 3)\n";
+            out << "  %bad = icmp slt i32 %flags, 0\n";
+            out << "  br i1 %bad, label %failed, label %set\n";
+            out << "set:\n";
+            out << "  %newflags = or i32 %flags, " << nonblock_flag << "\n";
+            out << "  %rc = call i32 (i32, i32, ...) @fcntl(i32 %fd, i32 4, i32 %newflags)\n";
+            out << "  ret i32 %rc\n";
+            out << "failed:\n  ret i32 -1\n";
+        }
+        out << "}\n\n";
+
+        out << "define internal %nus.neterr @nus_async_net_error(i32 %operation) {\n";
+        out << "entry:\n";
+        out << "  %native = call i32 @nus_net_last_error()\n";
+        out << "  %reason = call i32 @nus_net_reason(i32 %native)\n";
+        out << "  %e0 = insertvalue %nus.neterr zeroinitializer, i32 %operation, 0\n";
+        out << "  %e1 = insertvalue %nus.neterr %e0, i32 %reason, 1\n";
+        out << "  ret %nus.neterr %e1\n";
+        out << "}\n\n";
+
+        // tcp_accept_async poller.
+        out << "define internal i1 @nus_async_accept_poll(ptr %frame, ptr %out) {\n";
+        out << "entry:\n";
+        out << "  %handle.ptr = getelementptr inbounds %nus.future.accept.frame, ptr %frame, i32 0, i32 5\n";
+        out << "  %handle = load i64, ptr %handle.ptr\n";
+        if (windowsTarget()) {
+            out << "  %accepted = call i64 @accept(i64 %handle, ptr null, ptr null)\n";
+            out << "  %failed = icmp eq i64 %accepted, -1\n";
+        } else {
+            out << "  %fd = trunc i64 %handle to i32\n";
+            out << "  %accepted32 = call i32 @accept(i32 %fd, ptr null, ptr null)\n";
+            out << "  %failed = icmp slt i32 %accepted32, 0\n";
+            out << "  %accepted = sext i32 %accepted32 to i64\n";
+        }
+        out << "  br i1 %failed, label %error, label %success\n";
+        out << "error:\n";
+        out << "  %err = call %nus.neterr @nus_async_net_error(i32 8)\n";
+        out << "  %reason = extractvalue %nus.neterr %err, 1\n";
+        out << "  %again = icmp eq i32 %reason, 1\n";
+        out << "  br i1 %again, label %pending, label %failed.ready\n";
+        out << "pending:\n  ret i1 false\n";
+        out << "failed.ready:\n";
+        out << "  %r0 = insertvalue { i1, %nus.tcpstream, %nus.neterr } zeroinitializer, i1 true, 0\n";
+        out << "  %r1 = insertvalue { i1, %nus.tcpstream, %nus.neterr } %r0, %nus.neterr %err, 2\n";
+        out << "  store { i1, %nus.tcpstream, %nus.neterr } %r1, ptr %out\n";
+        out << "  ret i1 true\n";
+        out << "success:\n";
+        out << "  %stream = insertvalue %nus.tcpstream zeroinitializer, i64 %accepted, 0\n";
+        out << "  %ok0 = insertvalue { i1, %nus.tcpstream, %nus.neterr } zeroinitializer, i1 false, 0\n";
+        out << "  %ok1 = insertvalue { i1, %nus.tcpstream, %nus.neterr } %ok0, %nus.tcpstream %stream, 1\n";
+        out << "  store { i1, %nus.tcpstream, %nus.neterr } %ok1, ptr %out\n";
+        out << "  ret i1 true\n";
+        out << "}\n\n";
+        out << "define internal void @nus_async_accept_drop(ptr %frame) {\nentry:\n  call void @free(ptr %frame)\n  ret void\n}\n\n";
+
+        // tcp_receive_async poller.
+        const std::string vec = "{ ptr, " + usize + ", " + usize + " }";
+        const std::string recv_result = "{ i1, " + vec + ", %nus.neterr }";
+        out << "define internal i1 @nus_async_recv_poll(ptr %frame, ptr %out) {\n";
+        out << "entry:\n";
+        out << "  %handle.ptr = getelementptr inbounds %nus.future.recv.frame, ptr %frame, i32 0, i32 5\n";
+        out << "  %max.ptr = getelementptr inbounds %nus.future.recv.frame, ptr %frame, i32 0, i32 6\n";
+        out << "  %handle = load i64, ptr %handle.ptr\n";
+        out << "  %max = load " << usize << ", ptr %max.ptr\n";
+        out << "  %data = call ptr @malloc(" << usize << " %max)\n";
+        out << "  %alloc.ok = icmp ne ptr %data, null\n";
+        out << "  %zero.max = icmp eq " << usize << " %max, 0\n";
+        out << "  %alloc.valid = or i1 %alloc.ok, %zero.max\n";
+        out << "  br i1 %alloc.valid, label %receive, label %alloc.fail\n";
+        out << "alloc.fail:\n";
+        out << "  %ae0 = insertvalue %nus.neterr zeroinitializer, i32 1, 0\n";
+        out << "  %ae1 = insertvalue %nus.neterr %ae0, i32 0, 1\n";
+        out << "  %ar0 = insertvalue " << recv_result << " zeroinitializer, i1 true, 0\n";
+        out << "  %ar1 = insertvalue " << recv_result << " %ar0, %nus.neterr %ae1, 2\n";
+        out << "  store " << recv_result << " %ar1, ptr %out\n  ret i1 true\n";
+        out << "receive:\n";
+        if (windowsTarget()) {
+            out << "  %max32 = trunc " << usize << " %max to i32\n";
+            out << "  %rc = call i32 @recv(i64 %handle, ptr %data, i32 %max32, i32 0)\n";
+            out << "  %failed = icmp slt i32 %rc, 0\n";
+        } else {
+            out << "  %fd = trunc i64 %handle to i32\n";
+            out << "  %rc = call i64 @recv(i32 %fd, ptr %data, i64 %max, i32 0)\n";
+            out << "  %failed = icmp slt i64 %rc, 0\n";
+        }
+        out << "  br i1 %failed, label %recv.error, label %recv.success\n";
+        out << "recv.error:\n";
+        out << "  %err = call %nus.neterr @nus_async_net_error(i32 6)\n";
+        out << "  call void @free(ptr %data)\n";
+        out << "  %reason = extractvalue %nus.neterr %err, 1\n";
+        out << "  %again = icmp eq i32 %reason, 1\n";
+        out << "  br i1 %again, label %recv.pending, label %recv.failed.ready\n";
+        out << "recv.pending:\n  ret i1 false\n";
+        out << "recv.failed.ready:\n";
+        out << "  %er0 = insertvalue " << recv_result << " zeroinitializer, i1 true, 0\n";
+        out << "  %er1 = insertvalue " << recv_result << " %er0, %nus.neterr %err, 2\n";
+        out << "  store " << recv_result << " %er1, ptr %out\n  ret i1 true\n";
+        out << "recv.success:\n";
+        if (windowsTarget()) out << "  %count = zext i32 %rc to " << usize << "\n";
+        else out << "  %count = add " << usize << " %rc, 0\n";
+        out << "  %v0 = insertvalue " << vec << " zeroinitializer, ptr %data, 0\n";
+        out << "  %v1 = insertvalue " << vec << " %v0, " << usize << " %count, 1\n";
+        out << "  %v2 = insertvalue " << vec << " %v1, " << usize << " %max, 2\n";
+        out << "  %rr0 = insertvalue " << recv_result << " zeroinitializer, i1 false, 0\n";
+        out << "  %rr1 = insertvalue " << recv_result << " %rr0, " << vec << " %v2, 1\n";
+        out << "  store " << recv_result << " %rr1, ptr %out\n  ret i1 true\n";
+        out << "}\n\n";
+        out << "define internal void @nus_async_recv_drop(ptr %frame) {\nentry:\n  call void @free(ptr %frame)\n  ret void\n}\n\n";
+
+        // tcp_send_async poller. The buffer remains borrowed by the Future until completion.
+        const std::string send_result = "{ i1, " + usize + ", %nus.neterr }";
+        out << "define internal i1 @nus_async_send_poll(ptr %frame, ptr %out) {\n";
+        out << "entry:\n";
+        out << "  %handle.ptr = getelementptr inbounds %nus.future.send.frame, ptr %frame, i32 0, i32 5\n";
+        out << "  %data.ptr = getelementptr inbounds %nus.future.send.frame, ptr %frame, i32 0, i32 6\n";
+        out << "  %len.ptr = getelementptr inbounds %nus.future.send.frame, ptr %frame, i32 0, i32 7\n";
+        out << "  %handle = load i64, ptr %handle.ptr\n";
+        out << "  %data = load ptr, ptr %data.ptr\n";
+        out << "  %len = load " << usize << ", ptr %len.ptr\n";
+        if (windowsTarget()) {
+            out << "  %len32 = trunc " << usize << " %len to i32\n";
+            out << "  %rc = call i32 @send(i64 %handle, ptr %data, i32 %len32, i32 0)\n";
+            out << "  %failed = icmp slt i32 %rc, 0\n";
+        } else {
+            out << "  %fd = trunc i64 %handle to i32\n";
+            out << "  %rc = call i64 @send(i32 %fd, ptr %data, i64 %len, i32 0)\n";
+            out << "  %failed = icmp slt i64 %rc, 0\n";
+        }
+        out << "  br i1 %failed, label %send.error, label %send.success\n";
+        out << "send.error:\n";
+        out << "  %err = call %nus.neterr @nus_async_net_error(i32 5)\n";
+        out << "  %reason = extractvalue %nus.neterr %err, 1\n";
+        out << "  %again = icmp eq i32 %reason, 1\n";
+        out << "  br i1 %again, label %send.pending, label %send.failed.ready\n";
+        out << "send.pending:\n  ret i1 false\n";
+        out << "send.failed.ready:\n";
+        out << "  %er0 = insertvalue " << send_result << " zeroinitializer, i1 true, 0\n";
+        out << "  %er1 = insertvalue " << send_result << " %er0, %nus.neterr %err, 2\n";
+        out << "  store " << send_result << " %er1, ptr %out\n  ret i1 true\n";
+        out << "send.success:\n";
+        if (windowsTarget()) out << "  %count = zext i32 %rc to " << usize << "\n";
+        else out << "  %count = add " << usize << " %rc, 0\n";
+        out << "  %sr0 = insertvalue " << send_result << " zeroinitializer, i1 false, 0\n";
+        out << "  %sr1 = insertvalue " << send_result << " %sr0, " << usize << " %count, 1\n";
+        out << "  store " << send_result << " %sr1, ptr %out\n  ret i1 true\n";
+        out << "}\n\n";
+        out << "define internal void @nus_async_send_drop(ptr %frame) {\nentry:\n  call void @free(ptr %frame)\n  ret void\n}\n\n";
+
+        (void)read_mask;
+        (void)write_mask;
     }
 
     void emitAssertHelper(std::ostringstream& out) const {
@@ -900,20 +1305,70 @@ void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& poi
             out_ << "  call void @free(ptr " << entries << ")\n";
             break;
         }
+        case TypeKind::Executor: {
+            const std::string loaded = next("dropexecutor");
+            const std::string data = next("executortasks");
+            const std::string length = next("executorlen");
+            const std::string index_slot = next("executoridxslot");
+            const std::string head = nextLabel("drop.executor.head.");
+            const std::string body = nextLabel("drop.executor.body.");
+            const std::string done = nextLabel("drop.executor.done.");
+            out_ << "  " << loaded << " = load %nus.executor, ptr " << pointer << "\n";
+            out_ << "  " << data << " = extractvalue %nus.executor " << loaded << ", 0\n";
+            out_ << "  " << length << " = extractvalue %nus.executor " << loaded << ", 1\n";
+            out_ << "  " << index_slot << " = alloca " << module_.usizeType() << "\n";
+            out_ << "  store " << module_.usizeType() << " 0, ptr " << index_slot << "\n";
+            out_ << "  br label %" << head << "\n";
+            out_ << head << ":\n";
+            const std::string index = next("executoridx");
+            const std::string more = next("executormore");
+            out_ << "  " << index << " = load " << module_.usizeType() << ", ptr " << index_slot << "\n";
+            out_ << "  " << more << " = icmp ult " << module_.usizeType() << ' ' << index << ", " << length << "\n";
+            out_ << "  br i1 " << more << ", label %" << body << ", label %" << done << "\n";
+            out_ << body << ":\n";
+            const std::string task = next("task");
+            const std::string frame_ptr = next("taskframeptr");
+            const std::string drop_ptr = next("taskdropptr");
+            const std::string frame = next("taskframe");
+            const std::string drop = next("taskdrop");
+            out_ << "  " << task << " = getelementptr inbounds %nus.task, ptr " << data << ", " << module_.usizeType() << ' ' << index << "\n";
+            out_ << "  " << frame_ptr << " = getelementptr inbounds %nus.task, ptr " << task << ", i32 0, i32 0\n";
+            out_ << "  " << drop_ptr << " = getelementptr inbounds %nus.task, ptr " << task << ", i32 0, i32 2\n";
+            out_ << "  " << frame << " = load ptr, ptr " << frame_ptr << "\n";
+            out_ << "  " << drop << " = load ptr, ptr " << drop_ptr << "\n";
+            out_ << "  call void " << drop << "(ptr " << frame << ")\n";
+            const std::string inc = next("executoridx");
+            out_ << "  " << inc << " = add " << module_.usizeType() << ' ' << index << ", 1\n";
+            out_ << "  store " << module_.usizeType() << ' ' << inc << ", ptr " << index_slot << "\n";
+            out_ << "  br label %" << head << "\n";
+            out_ << done << ":\n";
+            out_ << "  call void @free(ptr " << data << ")\n";
+            break;
+        }
         case TypeKind::Future: {
             if (!type.element) throw std::runtime_error("LLVM codegen: malformed Future drop type");
-            if (type.element->isUnit() || type.element->isCopy() || type.element->isReference()) break;
             const std::string future = next("dropfuture");
             const std::string ready = next("futureready");
-            const std::string do_label = nextLabel("drop.future.do.");
+            const std::string ready_label = nextLabel("drop.future.ready.");
+            const std::string pending_label = nextLabel("drop.future.pending.");
             const std::string done_label = nextLabel("drop.future.done.");
             out_ << "  " << future << " = load " << module_.llvmType(type) << ", ptr " << pointer << "\n";
             out_ << "  " << ready << " = extractvalue " << module_.llvmType(type) << ' ' << future << ", 0\n";
-            out_ << "  br i1 " << ready << ", label %" << do_label << ", label %" << done_label << "\n";
-            out_ << do_label << ":\n";
-            const std::string payload_ptr = next("futurepayload");
-            out_ << "  " << payload_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer << ", i32 0, i32 1\n";
-            emitDestroy(*type.element, payload_ptr);
+            out_ << "  br i1 " << ready << ", label %" << ready_label << ", label %" << pending_label << "\n";
+            out_ << ready_label << ":\n";
+            if (!type.element->isUnit() && !type.element->isCopy() && !type.element->isReference()) {
+                const std::string payload_ptr = next("futurepayload");
+                out_ << "  " << payload_ptr << " = getelementptr inbounds " << module_.llvmType(type) << ", ptr " << pointer << ", i32 0, i32 1\n";
+                emitDestroy(*type.element, payload_ptr);
+            }
+            out_ << "  br label %" << done_label << "\n";
+            out_ << pending_label << ":\n";
+            const std::string frame = next("futureframe");
+            const std::string drop = next("futuredrop");
+            const std::size_t frame_field = type.element->isUnit() ? 1U : 2U;
+            out_ << "  " << frame << " = extractvalue " << module_.llvmType(type) << ' ' << future << ", " << frame_field << "\n";
+            out_ << "  " << drop << " = extractvalue " << module_.llvmType(type) << ' ' << future << ", " << (frame_field + 2U) << "\n";
+            out_ << "  call void " << drop << "(ptr " << frame << ")\n";
             out_ << "  br label %" << done_label << "\n";
             out_ << done_label << ":\n";
             break;
@@ -2301,6 +2756,196 @@ void FunctionEmitter::builtinSetNonblocking(const mir::Instruction& inst,
     store(*inst.destination, {module_.llvmType(result_type), loaded});
 }
 
+void FunctionEmitter::builtinTcpAcceptAsync(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: tcp_accept_async expects &mut TcpListener");
+    const auto& future_type = local(*inst.destination).type;
+    if (future_type.kind != sema::TypeKind::Future || !future_type.element) throw std::runtime_error("LLVM codegen: tcp_accept_async destination must be Future<Result<...>>");
+    const auto& result_type = *future_type.element;
+    const Value listener_ref = value(arguments[0]);
+    const std::string listener = next("asynclistener");
+    const std::string handle = next("asynchandle");
+    out_ << "  " << listener << " = load %nus.tcplistener, ptr " << listener_ref.repr << "\n";
+    out_ << "  " << handle << " = extractvalue %nus.tcplistener " << listener << ", 0\n";
+    const std::string rc = next("asyncnonblock");
+    out_ << "  " << rc << " = call i32 @nus_socket_set_nonblocking(i64 " << handle << ")\n";
+    const std::string ok = next("asyncnbok");
+    const std::string pending_label = nextLabel("accept.async.pending.");
+    const std::string error_label = nextLabel("accept.async.error.");
+    const std::string done = nextLabel("accept.async.done.");
+    const std::string future_slot = next("asyncfutureslot");
+    const std::string future_ir = module_.llvmType(future_type);
+    out_ << "  " << future_slot << " = alloca " << future_ir << "\n";
+    out_ << "  " << ok << " = icmp eq i32 " << rc << ", 0\n";
+    out_ << "  br i1 " << ok << ", label %" << pending_label << ", label %" << error_label << "\n";
+    out_ << error_label << ":\n";
+    const Value error = emitNetworkError(10);
+    const Value result = emitNetworkResult(result_type, true, error);
+    std::string ready = next("asyncfuture");
+    out_ << "  " << ready << " = insertvalue " << future_ir << " zeroinitializer, i1 true, 0\n";
+    std::string ready_payload = next("asyncfuture");
+    out_ << "  " << ready_payload << " = insertvalue " << future_ir << ' ' << ready << ", " << result.type << ' ' << result.repr << ", 1\n";
+    out_ << "  store " << future_ir << ' ' << ready_payload << ", ptr " << future_slot << "\n";
+    out_ << "  br label %" << done << "\n";
+    out_ << pending_label << ":\n";
+    const std::string one = next("acceptframeone");
+    const std::string bytes = next("acceptframebytes");
+    const std::string frame = next("acceptframe");
+    out_ << "  " << one << " = getelementptr %nus.future.accept.frame, ptr null, i32 1\n";
+    out_ << "  " << bytes << " = ptrtoint ptr " << one << " to " << module_.usizeType() << "\n";
+    out_ << "  " << frame << " = call ptr @malloc(" << module_.usizeType() << ' ' << bytes << ")\n";
+    out_ << "  %" << sanitize(pending_label) << ".state = getelementptr inbounds %nus.future.accept.frame, ptr " << frame << ", i32 0, i32 0\n";
+    out_ << "  %" << sanitize(pending_label) << ".handle = getelementptr inbounds %nus.future.accept.frame, ptr " << frame << ", i32 0, i32 1\n";
+    out_ << "  %" << sanitize(pending_label) << ".events = getelementptr inbounds %nus.future.accept.frame, ptr " << frame << ", i32 0, i32 2\n";
+    out_ << "  %" << sanitize(pending_label) << ".reactor = getelementptr inbounds %nus.future.accept.frame, ptr " << frame << ", i32 0, i32 3\n";
+    out_ << "  %" << sanitize(pending_label) << ".timeout = getelementptr inbounds %nus.future.accept.frame, ptr " << frame << ", i32 0, i32 4\n";
+    out_ << "  %" << sanitize(pending_label) << ".resource = getelementptr inbounds %nus.future.accept.frame, ptr " << frame << ", i32 0, i32 5\n";
+    out_ << "  store i32 0, ptr %" << sanitize(pending_label) << ".state\n";
+    out_ << "  store i64 " << handle << ", ptr %" << sanitize(pending_label) << ".handle\n";
+    out_ << "  store i16 " << (module_.windowsTarget() ? 0x0100 : 0x0001) << ", ptr %" << sanitize(pending_label) << ".events\n";
+    out_ << "  store ptr null, ptr %" << sanitize(pending_label) << ".reactor\n";
+    out_ << "  store i32 -1, ptr %" << sanitize(pending_label) << ".timeout\n";
+    out_ << "  store i64 " << handle << ", ptr %" << sanitize(pending_label) << ".resource\n";
+    std::string f0 = next("asyncfuture");
+    std::string f1 = next("asyncfuture");
+    std::string f2 = next("asyncfuture");
+    std::string f3 = next("asyncfuture");
+    out_ << "  " << f0 << " = insertvalue " << future_ir << " zeroinitializer, i1 false, 0\n";
+    out_ << "  " << f1 << " = insertvalue " << future_ir << ' ' << f0 << ", ptr " << frame << ", 2\n";
+    out_ << "  " << f2 << " = insertvalue " << future_ir << ' ' << f1 << ", ptr @nus_async_accept_poll, 3\n";
+    out_ << "  " << f3 << " = insertvalue " << future_ir << ' ' << f2 << ", ptr @nus_async_accept_drop, 4\n";
+    out_ << "  store " << future_ir << ' ' << f3 << ", ptr " << future_slot << "\n";
+    out_ << "  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("asyncfuture");
+    out_ << "  " << loaded << " = load " << future_ir << ", ptr " << future_slot << "\n";
+    store(*inst.destination, {future_ir, loaded});
+}
+
+void FunctionEmitter::builtinTcpReceiveAsync(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: tcp_receive_async expects &mut TcpStream and maximum length");
+    const auto& future_type = local(*inst.destination).type;
+    if (future_type.kind != sema::TypeKind::Future || !future_type.element) throw std::runtime_error("LLVM codegen: tcp_receive_async destination must be Future<Result<...>>");
+    const auto& result_type = *future_type.element;
+    const Value stream_ref = value(arguments[0]);
+    const Value requested = coerce(value(arguments[1]), arguments[1].type, sema::Type::simple(sema::TypeKind::USize));
+    const std::string stream = next("asyncstream");
+    const std::string handle = next("asynchandle");
+    out_ << "  " << stream << " = load %nus.tcpstream, ptr " << stream_ref.repr << "\n";
+    out_ << "  " << handle << " = extractvalue %nus.tcpstream " << stream << ", 0\n";
+    const std::string rc = next("asyncnonblock");
+    out_ << "  " << rc << " = call i32 @nus_socket_set_nonblocking(i64 " << handle << ")\n";
+    const std::string ok = next("asyncnbok");
+    const std::string pending_label = nextLabel("recv.async.pending.");
+    const std::string error_label = nextLabel("recv.async.error.");
+    const std::string done = nextLabel("recv.async.done.");
+    const std::string future_slot = next("asyncfutureslot");
+    const std::string future_ir = module_.llvmType(future_type);
+    out_ << "  " << future_slot << " = alloca " << future_ir << "\n";
+    out_ << "  " << ok << " = icmp eq i32 " << rc << ", 0\n";
+    out_ << "  br i1 " << ok << ", label %" << pending_label << ", label %" << error_label << "\n";
+    out_ << error_label << ":\n";
+    const Value error = emitNetworkError(10);
+    const Value result = emitNetworkResult(result_type, true, error);
+    std::string r0 = next("asyncfuture");
+    std::string r1 = next("asyncfuture");
+    out_ << "  " << r0 << " = insertvalue " << future_ir << " zeroinitializer, i1 true, 0\n";
+    out_ << "  " << r1 << " = insertvalue " << future_ir << ' ' << r0 << ", " << result.type << ' ' << result.repr << ", 1\n";
+    out_ << "  store " << future_ir << ' ' << r1 << ", ptr " << future_slot << "\n  br label %" << done << "\n";
+    out_ << pending_label << ":\n";
+    const std::string one = next("recvframeone");
+    const std::string bytes = next("recvframebytes");
+    const std::string frame = next("recvframe");
+    out_ << "  " << one << " = getelementptr %nus.future.recv.frame, ptr null, i32 1\n";
+    out_ << "  " << bytes << " = ptrtoint ptr " << one << " to " << module_.usizeType() << "\n";
+    out_ << "  " << frame << " = call ptr @malloc(" << module_.usizeType() << ' ' << bytes << ")\n";
+    const std::string pfx = "%" + sanitize(pending_label);
+    out_ << "  " << pfx << ".state = getelementptr inbounds %nus.future.recv.frame, ptr " << frame << ", i32 0, i32 0\n";
+    out_ << "  " << pfx << ".handle = getelementptr inbounds %nus.future.recv.frame, ptr " << frame << ", i32 0, i32 1\n";
+    out_ << "  " << pfx << ".events = getelementptr inbounds %nus.future.recv.frame, ptr " << frame << ", i32 0, i32 2\n";
+    out_ << "  " << pfx << ".reactor = getelementptr inbounds %nus.future.recv.frame, ptr " << frame << ", i32 0, i32 3\n";
+    out_ << "  " << pfx << ".timeout = getelementptr inbounds %nus.future.recv.frame, ptr " << frame << ", i32 0, i32 4\n";
+    out_ << "  " << pfx << ".resource = getelementptr inbounds %nus.future.recv.frame, ptr " << frame << ", i32 0, i32 5\n";
+    out_ << "  " << pfx << ".max = getelementptr inbounds %nus.future.recv.frame, ptr " << frame << ", i32 0, i32 6\n";
+    out_ << "  store i32 0, ptr " << pfx << ".state\n";
+    out_ << "  store i64 " << handle << ", ptr " << pfx << ".handle\n";
+    out_ << "  store i16 " << (module_.windowsTarget() ? 0x0100 : 0x0001) << ", ptr " << pfx << ".events\n";
+    out_ << "  store ptr null, ptr " << pfx << ".reactor\n";
+    out_ << "  store i32 -1, ptr " << pfx << ".timeout\n";
+    out_ << "  store i64 " << handle << ", ptr " << pfx << ".resource\n";
+    out_ << "  store " << module_.usizeType() << ' ' << requested.repr << ", ptr " << pfx << ".max\n";
+    std::string f0 = next("asyncfuture"), f1 = next("asyncfuture"), f2 = next("asyncfuture"), f3 = next("asyncfuture");
+    out_ << "  " << f0 << " = insertvalue " << future_ir << " zeroinitializer, i1 false, 0\n";
+    out_ << "  " << f1 << " = insertvalue " << future_ir << ' ' << f0 << ", ptr " << frame << ", 2\n";
+    out_ << "  " << f2 << " = insertvalue " << future_ir << ' ' << f1 << ", ptr @nus_async_recv_poll, 3\n";
+    out_ << "  " << f3 << " = insertvalue " << future_ir << ' ' << f2 << ", ptr @nus_async_recv_drop, 4\n";
+    out_ << "  store " << future_ir << ' ' << f3 << ", ptr " << future_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("asyncfuture");
+    out_ << "  " << loaded << " = load " << future_ir << ", ptr " << future_slot << "\n";
+    store(*inst.destination, {future_ir, loaded});
+}
+
+void FunctionEmitter::builtinTcpSendAsync(const mir::Instruction& inst, const std::vector<mir::Operand>& arguments) {
+    if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: tcp_send_async expects &mut TcpStream and &Vec<u8>");
+    const auto& future_type = local(*inst.destination).type;
+    if (future_type.kind != sema::TypeKind::Future || !future_type.element) throw std::runtime_error("LLVM codegen: tcp_send_async destination must be Future<Result<...>>");
+    const auto& result_type = *future_type.element;
+    const Value stream_ref = value(arguments[0]);
+    const Value buffer_ref = value(arguments[1]);
+    const std::string stream = next("asyncstream"), handle = next("asynchandle");
+    out_ << "  " << stream << " = load %nus.tcpstream, ptr " << stream_ref.repr << "\n";
+    out_ << "  " << handle << " = extractvalue %nus.tcpstream " << stream << ", 0\n";
+    const std::string vec_type = module_.llvmType(sema::Type::vector(sema::Type::simple(sema::TypeKind::U8)));
+    const std::string buffer = next("asyncbuffer"), data = next("asyncdata"), len = next("asynclen");
+    out_ << "  " << buffer << " = load " << vec_type << ", ptr " << buffer_ref.repr << "\n";
+    out_ << "  " << data << " = extractvalue " << vec_type << ' ' << buffer << ", 0\n";
+    out_ << "  " << len << " = extractvalue " << vec_type << ' ' << buffer << ", 1\n";
+    const std::string rc = next("asyncnonblock");
+    out_ << "  " << rc << " = call i32 @nus_socket_set_nonblocking(i64 " << handle << ")\n";
+    const std::string ok = next("asyncnbok"), pending_label = nextLabel("send.async.pending."), error_label = nextLabel("send.async.error."), done = nextLabel("send.async.done."), future_slot = next("asyncfutureslot"), future_ir = module_.llvmType(future_type);
+    out_ << "  " << future_slot << " = alloca " << future_ir << "\n";
+    out_ << "  " << ok << " = icmp eq i32 " << rc << ", 0\n  br i1 " << ok << ", label %" << pending_label << ", label %" << error_label << "\n";
+    out_ << error_label << ":\n";
+    const Value error = emitNetworkError(10);
+    const Value result = emitNetworkResult(result_type, true, error);
+    std::string r0 = next("asyncfuture"), r1 = next("asyncfuture");
+    out_ << "  " << r0 << " = insertvalue " << future_ir << " zeroinitializer, i1 true, 0\n";
+    out_ << "  " << r1 << " = insertvalue " << future_ir << ' ' << r0 << ", " << result.type << ' ' << result.repr << ", 1\n";
+    out_ << "  store " << future_ir << ' ' << r1 << ", ptr " << future_slot << "\n  br label %" << done << "\n";
+    out_ << pending_label << ":\n";
+    const std::string one = next("sendframeone"), bytes = next("sendframebytes"), frame = next("sendframe");
+    out_ << "  " << one << " = getelementptr %nus.future.send.frame, ptr null, i32 1\n";
+    out_ << "  " << bytes << " = ptrtoint ptr " << one << " to " << module_.usizeType() << "\n";
+    out_ << "  " << frame << " = call ptr @malloc(" << module_.usizeType() << ' ' << bytes << ")\n";
+    const std::string pfx = "%" + sanitize(pending_label);
+    out_ << "  " << pfx << ".state = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 0\n";
+    out_ << "  " << pfx << ".handle = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 1\n";
+    out_ << "  " << pfx << ".events = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 2\n";
+    out_ << "  " << pfx << ".reactor = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 3\n";
+    out_ << "  " << pfx << ".timeout = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 4\n";
+    out_ << "  " << pfx << ".resource = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 5\n";
+    out_ << "  " << pfx << ".data = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 6\n";
+    out_ << "  " << pfx << ".len = getelementptr inbounds %nus.future.send.frame, ptr " << frame << ", i32 0, i32 7\n";
+    out_ << "  store i32 0, ptr " << pfx << ".state\n";
+    out_ << "  store i64 " << handle << ", ptr " << pfx << ".handle\n";
+    out_ << "  store i16 " << (module_.windowsTarget() ? 0x0010 : 0x0004) << ", ptr " << pfx << ".events\n";
+    out_ << "  store ptr null, ptr " << pfx << ".reactor\n";
+    out_ << "  store i32 -1, ptr " << pfx << ".timeout\n";
+    out_ << "  store i64 " << handle << ", ptr " << pfx << ".resource\n";
+    out_ << "  store ptr " << data << ", ptr " << pfx << ".data\n";
+    out_ << "  store " << module_.usizeType() << ' ' << len << ", ptr " << pfx << ".len\n";
+    std::string f0 = next("asyncfuture"), f1 = next("asyncfuture"), f2 = next("asyncfuture"), f3 = next("asyncfuture");
+    out_ << "  " << f0 << " = insertvalue " << future_ir << " zeroinitializer, i1 false, 0\n";
+    out_ << "  " << f1 << " = insertvalue " << future_ir << ' ' << f0 << ", ptr " << frame << ", 2\n";
+    out_ << "  " << f2 << " = insertvalue " << future_ir << ' ' << f1 << ", ptr @nus_async_send_poll, 3\n";
+    out_ << "  " << f3 << " = insertvalue " << future_ir << ' ' << f2 << ", ptr @nus_async_send_drop, 4\n";
+    out_ << "  store " << future_ir << ' ' << f3 << ", ptr " << future_slot << "\n  br label %" << done << "\n";
+    out_ << done << ":\n";
+    const std::string loaded = next("asyncfuture");
+    out_ << "  " << loaded << " = load " << future_ir << ", ptr " << future_slot << "\n";
+    store(*inst.destination, {future_ir, loaded});
+}
+
 void FunctionEmitter::builtinReactorNew(const mir::Instruction& inst) {
     if (!inst.destination) throw std::runtime_error("LLVM codegen: reactor_new requires a destination");
     const auto& result_type = local(*inst.destination).type;
@@ -2601,6 +3246,9 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (callee.text == "tcp_set_timeout") { builtinTcpSetTimeout(inst, arguments); return; }
             if (callee.text == "tcp_send") { builtinTcpSend(inst, arguments); return; }
             if (callee.text == "tcp_receive") { builtinTcpReceive(inst, arguments); return; }
+            if (callee.text == "tcp_accept_async") { builtinTcpAcceptAsync(inst, arguments); return; }
+            if (callee.text == "tcp_receive_async") { builtinTcpReceiveAsync(inst, arguments); return; }
+            if (callee.text == "tcp_send_async") { builtinTcpSendAsync(inst, arguments); return; }
             if (callee.text == "udp_bind") { builtinUdpBind(inst, arguments); return; }
             if (callee.text == "udp_send_to") { builtinUdpSendTo(inst, arguments); return; }
             if (callee.text == "udp_receive") { builtinUdpReceive(inst, arguments); return; }
@@ -2616,6 +3264,133 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (callee.text == "reactor_event_token") { builtinReactorEventToken(inst, arguments); return; }
             if (callee.text == "reactor_event_readable") { builtinReactorEventReady(inst, arguments, false); return; }
             if (callee.text == "reactor_event_writable") { builtinReactorEventReady(inst, arguments, true); return; }
+            if (callee.text == "yield_now") {
+                if (!inst.destination || !arguments.empty()) throw std::runtime_error("LLVM codegen: yield_now expects no arguments");
+                const auto& future_type = local(*inst.destination).type;
+                const std::string future_ir = module_.llvmType(future_type);
+                const std::string one = next("yieldframeone");
+                const std::string bytes = next("yieldframebytes");
+                const std::string frame = next("yieldframe");
+                out_ << "  " << one << " = getelementptr %nus.future.yield.frame, ptr null, i32 1\n";
+                out_ << "  " << bytes << " = ptrtoint ptr " << one << " to " << module_.usizeType() << "\n";
+                out_ << "  " << frame << " = call ptr @malloc(" << module_.usizeType() << ' ' << bytes << ")\n";
+                const std::string ok = next("yieldalloc");
+                out_ << "  " << ok << " = icmp ne ptr " << frame << ", null\n";
+                out_ << "  call void @nus_assert(i1 " << ok << ")\n";
+                const std::string state = next("yieldstate");
+                const std::string handle = next("yieldhandle");
+                const std::string events = next("yieldevents");
+                const std::string reactor = next("yieldreactor");
+                const std::string timeout = next("yieldtimeout");
+                out_ << "  " << state << " = getelementptr inbounds %nus.future.yield.frame, ptr " << frame << ", i32 0, i32 0\n";
+                out_ << "  " << handle << " = getelementptr inbounds %nus.future.yield.frame, ptr " << frame << ", i32 0, i32 1\n";
+                out_ << "  " << events << " = getelementptr inbounds %nus.future.yield.frame, ptr " << frame << ", i32 0, i32 2\n";
+                out_ << "  " << reactor << " = getelementptr inbounds %nus.future.yield.frame, ptr " << frame << ", i32 0, i32 3\n";
+                out_ << "  " << timeout << " = getelementptr inbounds %nus.future.yield.frame, ptr " << frame << ", i32 0, i32 4\n";
+                out_ << "  store i32 0, ptr " << state << "\n";
+                out_ << "  store i64 -1, ptr " << handle << "\n";
+                out_ << "  store i16 0, ptr " << events << "\n";
+                out_ << "  store ptr null, ptr " << reactor << "\n";
+                out_ << "  store i32 1, ptr " << timeout << "\n";
+                std::string agg = "zeroinitializer";
+                const std::string f0 = next("yieldfuture");
+                const std::string f1 = next("yieldfuture");
+                const std::string f2 = next("yieldfuture");
+                const std::string f3 = next("yieldfuture");
+                out_ << "  " << f0 << " = insertvalue " << future_ir << ' ' << agg << ", i1 false, 0\n";
+                out_ << "  " << f1 << " = insertvalue " << future_ir << ' ' << f0 << ", ptr " << frame << ", 1\n";
+                out_ << "  " << f2 << " = insertvalue " << future_ir << ' ' << f1 << ", ptr @nus_yield_poll, 2\n";
+                out_ << "  " << f3 << " = insertvalue " << future_ir << ' ' << f2 << ", ptr @nus_yield_drop, 3\n";
+                store(*inst.destination, {future_ir, f3});
+                return;
+            }
+            if (callee.text == "executor_new") {
+                if (!inst.destination || !arguments.empty()) throw std::runtime_error("LLVM codegen: executor_new expects no arguments");
+                store(*inst.destination, {"%nus.executor", "zeroinitializer"});
+                return;
+            }
+            if (callee.text == "executor_spawn") {
+                if (arguments.size() != 2) throw std::runtime_error("LLVM codegen: executor_spawn expects &mut Executor and Future<unit>");
+                const Value executor = value(arguments[0]);
+                const Value future = value(arguments[1]);
+                const std::string ready = next("spawnready");
+                const std::string enqueue = nextLabel("spawn.enqueue.");
+                const std::string done = nextLabel("spawn.done.");
+                out_ << "  " << ready << " = extractvalue " << future.type << ' ' << future.repr << ", 0\n";
+                markMoved(arguments[1]);
+                out_ << "  br i1 " << ready << ", label %" << done << ", label %" << enqueue << "\n";
+                out_ << enqueue << ":\n";
+                const std::string frame = next("spawnframe");
+                const std::string poll = next("spawnpoll");
+                const std::string drop = next("spawndrop");
+                out_ << "  " << frame << " = extractvalue " << future.type << ' ' << future.repr << ", 1\n";
+                out_ << "  " << poll << " = extractvalue " << future.type << ' ' << future.repr << ", 2\n";
+                out_ << "  " << drop << " = extractvalue " << future.type << ' ' << future.repr << ", 3\n";
+                const std::string data_ptr = next("execdataptr");
+                const std::string len_ptr = next("execlenptr");
+                const std::string cap_ptr = next("execcapptr");
+                out_ << "  " << data_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 0\n";
+                out_ << "  " << len_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 1\n";
+                out_ << "  " << cap_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 2\n";
+                const std::string data = next("execdata");
+                const std::string len = next("execlen");
+                const std::string cap = next("execcap");
+                const std::string need = next("execneed");
+                const std::string grow = next("execgrow");
+                out_ << "  " << data << " = load ptr, ptr " << data_ptr << "\n";
+                out_ << "  " << len << " = load " << module_.usizeType() << ", ptr " << len_ptr << "\n";
+                out_ << "  " << cap << " = load " << module_.usizeType() << ", ptr " << cap_ptr << "\n";
+                out_ << "  " << need << " = add " << module_.usizeType() << ' ' << len << ", 1\n";
+                out_ << "  " << grow << " = icmp ugt " << module_.usizeType() << ' ' << need << ", " << cap << "\n";
+                const std::string resize = nextLabel("spawn.resize.");
+                const std::string write = nextLabel("spawn.write.");
+                const std::string resized_ok = nextLabel("spawn.resize.ok.");
+                out_ << "  br i1 " << grow << ", label %" << resize << ", label %" << write << "\n";
+                out_ << resize << ":\n";
+                const std::string empty = next("execempty");
+                const std::string doubled = next("execdouble");
+                const std::string newcap = next("execnewcap");
+                const std::string one = next("taskone");
+                const std::string stride = next("taskstride");
+                const std::string bytes = next("taskbytes");
+                const std::string resized = next("execresized");
+                const std::string allocok = next("execallocok");
+                out_ << "  " << empty << " = icmp eq " << module_.usizeType() << ' ' << cap << ", 0\n";
+                out_ << "  " << doubled << " = mul " << module_.usizeType() << ' ' << cap << ", 2\n";
+                out_ << "  " << newcap << " = select i1 " << empty << ", " << module_.usizeType() << " 4, " << module_.usizeType() << ' ' << doubled << "\n";
+                out_ << "  " << one << " = getelementptr %nus.task, ptr null, i32 1\n";
+                out_ << "  " << stride << " = ptrtoint ptr " << one << " to " << module_.usizeType() << "\n";
+                out_ << "  " << bytes << " = mul " << module_.usizeType() << ' ' << newcap << ", " << stride << "\n";
+                out_ << "  " << resized << " = call ptr @realloc(ptr " << data << ", " << module_.usizeType() << ' ' << bytes << ")\n";
+                out_ << "  " << allocok << " = icmp ne ptr " << resized << ", null\n";
+                out_ << "  call void @nus_assert(i1 " << allocok << ")\n";
+                out_ << "  store ptr " << resized << ", ptr " << data_ptr << "\n";
+                out_ << "  store " << module_.usizeType() << ' ' << newcap << ", ptr " << cap_ptr << "\n";
+                out_ << "  br label %" << resized_ok << "\n";
+                out_ << resized_ok << ":\n  br label %" << write << "\n";
+                out_ << write << ":\n";
+                const std::string active = next("execactive");
+                out_ << "  " << active << " = phi ptr [ " << data << ", %" << enqueue << " ], [ " << resized << ", %" << resized_ok << " ]\n";
+                const std::string task = next("taskslot");
+                out_ << "  " << task << " = getelementptr inbounds %nus.task, ptr " << active << ", " << module_.usizeType() << ' ' << len << "\n";
+                const std::string t0 = next("task");
+                const std::string t1 = next("task");
+                const std::string t2 = next("task");
+                out_ << "  " << t0 << " = insertvalue %nus.task zeroinitializer, ptr " << frame << ", 0\n";
+                out_ << "  " << t1 << " = insertvalue %nus.task " << t0 << ", ptr " << poll << ", 1\n";
+                out_ << "  " << t2 << " = insertvalue %nus.task " << t1 << ", ptr " << drop << ", 2\n";
+                out_ << "  store %nus.task " << t2 << ", ptr " << task << "\n";
+                out_ << "  store " << module_.usizeType() << ' ' << need << ", ptr " << len_ptr << "\n";
+                out_ << "  br label %" << done << "\n";
+                out_ << done << ":\n";
+                return;
+            }
+            if (callee.text == "executor_run") {
+                if (arguments.size() != 1) throw std::runtime_error("LLVM codegen: executor_run expects &mut Executor");
+                const Value executor = value(arguments[0]);
+                out_ << "  call void @nus_executor_run(ptr " << executor.repr << ")\n";
+                return;
+            }
             if (callee.text == "vec_new_i32" || callee.text.rfind("__builtin_vec_new$", 0) == 0) { builtinVecNew(inst); return; }
             if (callee.text == "vec_push_i32" || callee.text.rfind("__builtin_vec_push$", 0) == 0) { builtinVecPush(arguments); return; }
             if (callee.text == "vec_len_i32" || callee.text.rfind("__builtin_vec_len$", 0) == 0) { builtinVecLen(inst, arguments); return; }
@@ -2629,17 +3404,55 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 if (future_operand.type.kind != sema::TypeKind::Future || !future_operand.type.element) throw std::runtime_error("LLVM codegen: block_on operand must be Future<T>");
                 const Value future = value(future_operand);
                 const std::string ready = next("blockready");
+                const std::string immediate = nextLabel("block.immediate.");
+                const std::string pending = nextLabel("block.pending.");
+                const std::string poll = nextLabel("block.poll.");
+                const std::string wait = nextLabel("block.wait.");
+                const std::string polled_ready = nextLabel("block.polled.ready.");
+                const std::string done = nextLabel("block.done.");
                 out_ << "  " << ready << " = extractvalue " << future.type << ' ' << future.repr << ", 0\n";
-                out_ << "  call void @nus_assert(i1 " << ready << ")\n";
+                out_ << "  br i1 " << ready << ", label %" << immediate << ", label %" << pending << "\n";
+                out_ << immediate << ":\n";
                 if (!future_operand.type.element->isUnit()) {
                     const std::string payload = next("blockvalue");
                     const std::string payload_type = module_.llvmType(*future_operand.type.element);
                     out_ << "  " << payload << " = extractvalue " << future.type << ' ' << future.repr << ", 1\n";
-                    markMoved(future_operand);
                     store(*inst.destination, {payload_type, payload});
-                } else {
-                    markMoved(future_operand);
                 }
+                markMoved(future_operand);
+                out_ << "  br label %" << done << "\n";
+                out_ << pending << ":\n";
+                const std::size_t frame_field = futureFrameField(future_operand.type);
+                const std::string frame = next("blockframe");
+                const std::string pollfn = next("blockpoll");
+                const std::string dropfn = next("blockdrop");
+                out_ << "  " << frame << " = extractvalue " << future.type << ' ' << future.repr << ", " << frame_field << "\n";
+                out_ << "  " << pollfn << " = extractvalue " << future.type << ' ' << future.repr << ", " << futurePollField(future_operand.type) << "\n";
+                out_ << "  " << dropfn << " = extractvalue " << future.type << ' ' << future.repr << ", " << futureDropField(future_operand.type) << "\n";
+                std::string output_ptr = "null";
+                if (!future_operand.type.element->isUnit()) {
+                    output_ptr = next("blockout");
+                    out_ << "  " << output_ptr << " = alloca " << module_.llvmType(*future_operand.type.element) << "\n";
+                }
+                out_ << "  br label %" << poll << "\n";
+                out_ << poll << ":\n";
+                const std::string polled = next("blockpolled");
+                out_ << "  " << polled << " = call i1 " << pollfn << "(ptr " << frame << ", ptr " << output_ptr << ")\n";
+                out_ << "  br i1 " << polled << ", label %" << polled_ready << ", label %" << wait << "\n";
+                out_ << wait << ":\n";
+                out_ << "  call void @nus_future_wait(ptr " << frame << ")\n";
+                out_ << "  br label %" << poll << "\n";
+                out_ << polled_ready << ":\n";
+                if (!future_operand.type.element->isUnit()) {
+                    const std::string payload = next("blockvalue");
+                    const std::string payload_type = module_.llvmType(*future_operand.type.element);
+                    out_ << "  " << payload << " = load " << payload_type << ", ptr " << output_ptr << "\n";
+                    store(*inst.destination, {payload_type, payload});
+                }
+                out_ << "  call void " << dropfn << "(ptr " << frame << ")\n";
+                markMoved(future_operand);
+                out_ << "  br label %" << done << "\n";
+                out_ << done << ":\n";
                 return;
             }
             if (callee.text.rfind("__builtin_some$", 0) == 0 || callee.text.rfind("__builtin_none$", 0) == 0 ||
@@ -3073,19 +3886,85 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             if (!inst.destination || inst.operands.size() != 1) throw std::runtime_error("LLVM codegen: await expects one future operand");
             const auto& future_operand = inst.operands.front();
             if (future_operand.type.kind != sema::TypeKind::Future || !future_operand.type.element) throw std::runtime_error("LLVM codegen: await operand must be Future<T>");
+            if (!async_poll_mode_) throw std::runtime_error("LLVM codegen: await reached outside async poll state machine");
+            const auto state_it = await_states_.find(&inst);
+            if (state_it == await_states_.end()) throw std::runtime_error("LLVM codegen: await state was not assigned");
+            const std::string poll_label = await_labels_.at(&inst);
+            const std::string immediate = nextLabel("await.immediate.");
+            const std::string do_poll = nextLabel("await.poll.");
+            const std::string poll_ready = nextLabel("await.poll.ready.");
+            const std::string suspend = nextLabel("await.suspend.");
+            const std::string done = nextLabel("await.done.");
+            out_ << "  br label %" << poll_label << "\n";
+            out_ << poll_label << ":\n";
             const Value future = value(future_operand);
             const std::string ready = next("awaitready");
             out_ << "  " << ready << " = extractvalue " << future.type << ' ' << future.repr << ", 0\n";
-            out_ << "  call void @nus_assert(i1 " << ready << ")\n";
+            out_ << "  br i1 " << ready << ", label %" << immediate << ", label %" << do_poll << "\n";
+            out_ << immediate << ":\n";
             if (!future_operand.type.element->isUnit()) {
                 const std::string payload = next("awaitvalue");
                 const std::string payload_type = module_.llvmType(*future_operand.type.element);
                 out_ << "  " << payload << " = extractvalue " << future.type << ' ' << future.repr << ", 1\n";
-                markMoved(future_operand);
                 store(*inst.destination, {payload_type, payload});
-            } else {
-                markMoved(future_operand);
             }
+            markMoved(future_operand);
+            out_ << "  br label %" << done << "\n";
+            out_ << do_poll << ":\n";
+            const std::size_t frame_field = futureFrameField(future_operand.type);
+            const std::string child_frame = next("awaitframe");
+            const std::string child_poll = next("awaitpoll");
+            const std::string child_drop = next("awaitdrop");
+            out_ << "  " << child_frame << " = extractvalue " << future.type << ' ' << future.repr << ", " << frame_field << "\n";
+            out_ << "  " << child_poll << " = extractvalue " << future.type << ' ' << future.repr << ", " << futurePollField(future_operand.type) << "\n";
+            out_ << "  " << child_drop << " = extractvalue " << future.type << ' ' << future.repr << ", " << futureDropField(future_operand.type) << "\n";
+            std::string output_ptr = "null";
+            if (!future_operand.type.element->isUnit()) {
+                output_ptr = next("awaitout");
+                out_ << "  " << output_ptr << " = alloca " << module_.llvmType(*future_operand.type.element) << "\n";
+            }
+            const std::string polled = next("awaitpolled");
+            out_ << "  " << polled << " = call i1 " << child_poll << "(ptr " << child_frame << ", ptr " << output_ptr << ")\n";
+            out_ << "  br i1 " << polled << ", label %" << poll_ready << ", label %" << suspend << "\n";
+            out_ << suspend << ":\n";
+            out_ << "  store i32 " << state_it->second << ", ptr %async.state\n";
+            const std::string ch = next("waithandle");
+            const std::string ce = next("waitevents");
+            const std::string cr = next("waitreactor");
+            const std::string ct = next("waittimeout");
+            const std::string hptr = next("childhandleptr");
+            const std::string eptr = next("childeventsptr");
+            const std::string rptr = next("childreactorptr");
+            const std::string tptr = next("childtimeoutptr");
+            out_ << "  " << hptr << " = getelementptr inbounds %nus.future.header, ptr " << child_frame << ", i32 0, i32 1\n";
+            out_ << "  " << eptr << " = getelementptr inbounds %nus.future.header, ptr " << child_frame << ", i32 0, i32 2\n";
+            out_ << "  " << rptr << " = getelementptr inbounds %nus.future.header, ptr " << child_frame << ", i32 0, i32 3\n";
+            out_ << "  " << tptr << " = getelementptr inbounds %nus.future.header, ptr " << child_frame << ", i32 0, i32 4\n";
+            out_ << "  " << ch << " = load i64, ptr " << hptr << "\n";
+            out_ << "  " << ce << " = load i16, ptr " << eptr << "\n";
+            out_ << "  " << cr << " = load ptr, ptr " << rptr << "\n";
+            out_ << "  " << ct << " = load i32, ptr " << tptr << "\n";
+            out_ << "  store i64 " << ch << ", ptr %async.wait.handle\n";
+            out_ << "  store i16 " << ce << ", ptr %async.wait.events\n";
+            out_ << "  store ptr " << cr << ", ptr %async.wait.reactor\n";
+            out_ << "  store i32 " << ct << ", ptr %async.wait.timeout\n";
+            out_ << "  ret i1 false\n";
+            out_ << poll_ready << ":\n";
+            if (!future_operand.type.element->isUnit()) {
+                const std::string loaded = next("awaitvalue");
+                const std::string payload_type = module_.llvmType(*future_operand.type.element);
+                out_ << "  " << loaded << " = load " << payload_type << ", ptr " << output_ptr << "\n";
+                store(*inst.destination, {payload_type, loaded});
+            }
+            out_ << "  call void " << child_drop << "(ptr " << child_frame << ")\n";
+            markMoved(future_operand);
+            out_ << "  br label %" << done << "\n";
+            out_ << done << ":\n";
+            out_ << "  store i32 0, ptr %async.state\n";
+            out_ << "  store i64 -1, ptr %async.wait.handle\n";
+            out_ << "  store i16 0, ptr %async.wait.events\n";
+            out_ << "  store ptr null, ptr %async.wait.reactor\n";
+            out_ << "  store i32 -1, ptr %async.wait.timeout\n";
             break;
         }
         case InstructionKind::Drop:
@@ -3109,7 +3988,18 @@ void FunctionEmitter::terminator(const mir::Terminator& term) {
             break;
         }
         case TerminatorKind::Return:
-            if (function_.return_type.isUnit()) out_ << "  ret void\n";
+            if (async_poll_mode_) {
+                if (!function_.return_type.isUnit()) {
+                    const Value returned = coerce(value(term.value), term.value.type, function_.return_type);
+                    out_ << "  store " << returned.type << ' ' << returned.repr << ", ptr %out\n";
+                    markMoved(term.value);
+                }
+                out_ << "  store i32 -1, ptr %async.state\n";
+                out_ << "  store i64 -1, ptr %async.wait.handle\n";
+                out_ << "  store i16 0, ptr %async.wait.events\n";
+                out_ << "  store ptr null, ptr %async.wait.reactor\n";
+                out_ << "  ret i1 true\n";
+            } else if (function_.return_type.isUnit()) out_ << "  ret void\n";
             else {
                 const Value returned = coerce(value(term.value), term.value.type, function_.return_type);
                 out_ << "  ret " << returned.type << ' ' << returned.repr << "\n";
@@ -3121,7 +4011,7 @@ void FunctionEmitter::terminator(const mir::Terminator& term) {
     }
 }
 
-void FunctionEmitter::emit() {
+void FunctionEmitter::emitSync() {
     const std::string qualified = functionKey(function_);
     const std::string return_type = module_.llvmType(function_.return_type);
     std::vector<const mir::Local*> parameters;
@@ -3157,6 +4047,166 @@ void FunctionEmitter::emit() {
         terminator(*block.terminator);
     }
     out_ << "}\n\n";
+}
+
+
+std::size_t FunctionEmitter::asyncLocalField(mir::LocalId id) const {
+    std::size_t field = 5;
+    for (const auto& local : function_.locals) {
+        if (local.type.isUnit()) continue;
+        if (local.id == id) return field;
+        ++field;
+        if (!local.type.isCopy() && !local.type.isReference()) ++field;
+    }
+    throw std::runtime_error("LLVM codegen: async frame local field not found");
+}
+
+std::size_t FunctionEmitter::asyncDropField(mir::LocalId id) const {
+    std::size_t field = 5;
+    for (const auto& local : function_.locals) {
+        if (local.type.isUnit()) continue;
+        if (local.id == id) {
+            if (local.type.isCopy() || local.type.isReference()) {
+                throw std::runtime_error("LLVM codegen: async drop flag requested for Copy/reference local");
+            }
+            return field + 1;
+        }
+        ++field;
+        if (!local.type.isCopy() && !local.type.isReference()) ++field;
+    }
+    throw std::runtime_error("LLVM codegen: async frame drop field not found");
+}
+
+void FunctionEmitter::emitAsyncConstructor() {
+    const std::string qualified = functionKey(function_);
+    const std::string frame_type = asyncFrameSymbol(function_);
+    const sema::Type future_type = sema::Type::future(function_.return_type);
+    const std::string future_ir = module_.llvmType(future_type);
+    std::vector<const mir::Local*> parameters;
+    for (const auto& local : function_.locals) if (local.is_receiver || local.is_parameter) parameters.push_back(&local);
+
+    out_ << "define " << future_ir << " @" << module_.symbol(qualified) << '(';
+    for (std::size_t i = 0; i < parameters.size(); ++i) {
+        if (i) out_ << ", ";
+        out_ << module_.llvmType(parameters[i]->type) << " %arg" << i;
+    }
+    out_ << ") {\nentry:\n";
+    out_ << "  %frame.one = getelementptr " << frame_type << ", ptr null, i32 1\n";
+    out_ << "  %frame.bytes = ptrtoint ptr %frame.one to " << module_.usizeType() << "\n";
+    out_ << "  %frame = call ptr @malloc(" << module_.usizeType() << " %frame.bytes)\n";
+    out_ << "  %frame.ok = icmp ne ptr %frame, null\n";
+    out_ << "  call void @nus_assert(i1 %frame.ok)\n";
+    out_ << "  %state = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 0\n";
+    out_ << "  %wait.handle = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 1\n";
+    out_ << "  %wait.events = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 2\n";
+    out_ << "  %wait.reactor = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 3\n";
+    out_ << "  %wait.timeout = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 4\n";
+    out_ << "  store i32 0, ptr %state\n";
+    out_ << "  store i64 -1, ptr %wait.handle\n";
+    out_ << "  store i16 0, ptr %wait.events\n";
+    out_ << "  store ptr null, ptr %wait.reactor\n";
+    out_ << "  store i32 -1, ptr %wait.timeout\n";
+    for (const auto& local : function_.locals) {
+        if (local.type.isUnit()) continue;
+        out_ << "  %ctor.l" << local.id << " = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 " << asyncLocalField(local.id) << "\n";
+        if (!local.type.isCopy() && !local.type.isReference()) {
+            out_ << "  %ctor.df" << local.id << " = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 " << asyncDropField(local.id) << "\n";
+            out_ << "  store i1 false, ptr %ctor.df" << local.id << "\n";
+        }
+    }
+    for (std::size_t i = 0; i < parameters.size(); ++i) {
+        const auto& parameter = *parameters[i];
+        out_ << "  store " << module_.llvmType(parameter.type) << " %arg" << i << ", ptr %ctor.l" << parameter.id << "\n";
+        if (!parameter.type.isCopy() && !parameter.type.isReference()) out_ << "  store i1 true, ptr %ctor.df" << parameter.id << "\n";
+    }
+    std::string aggregate = "zeroinitializer";
+    const std::string ready = next("future");
+    out_ << "  " << ready << " = insertvalue " << future_ir << ' ' << aggregate << ", i1 false, 0\n";
+    aggregate = ready;
+    const std::size_t frame_field = futureFrameField(future_type);
+    const std::string with_frame = next("future");
+    out_ << "  " << with_frame << " = insertvalue " << future_ir << ' ' << aggregate << ", ptr %frame, " << frame_field << "\n";
+    aggregate = with_frame;
+    const std::string with_poll = next("future");
+    out_ << "  " << with_poll << " = insertvalue " << future_ir << ' ' << aggregate << ", ptr @" << module_.symbol(qualified + "$poll") << ", " << futurePollField(future_type) << "\n";
+    aggregate = with_poll;
+    const std::string with_drop = next("future");
+    out_ << "  " << with_drop << " = insertvalue " << future_ir << ' ' << aggregate << ", ptr @" << module_.symbol(qualified + "$drop") << ", " << futureDropField(future_type) << "\n";
+    out_ << "  ret " << future_ir << ' ' << with_drop << "\n}\n\n";
+}
+
+void FunctionEmitter::emitAsyncPoll() {
+    async_poll_mode_ = true;
+    next_value_ = 0;
+    next_label_ = 0;
+    await_states_.clear();
+    await_labels_.clear();
+    std::size_t next_state = 1;
+    for (const auto& block : function_.blocks) {
+        for (const auto& inst : block.instructions) {
+            if (inst.kind == mir::InstructionKind::Await) {
+                await_states_[&inst] = next_state;
+                await_labels_[&inst] = "await.resume." + std::to_string(next_state);
+                ++next_state;
+            }
+        }
+    }
+    const std::string qualified = functionKey(function_);
+    const std::string frame_type = asyncFrameSymbol(function_);
+    out_ << "define i1 @" << module_.symbol(qualified + "$poll") << "(ptr %frame, ptr %out) {\nentry:\n";
+    out_ << "  %async.state = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 0\n";
+    out_ << "  %async.wait.handle = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 1\n";
+    out_ << "  %async.wait.events = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 2\n";
+    out_ << "  %async.wait.reactor = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 3\n";
+    out_ << "  %async.wait.timeout = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 4\n";
+    for (const auto& local : function_.locals) {
+        if (local.type.isUnit()) continue;
+        out_ << "  " << slot(local.id) << " = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 " << asyncLocalField(local.id) << "\n";
+        if (!local.type.isCopy() && !local.type.isReference()) out_ << "  " << dropFlag(local.id) << " = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 " << asyncDropField(local.id) << "\n";
+    }
+    out_ << "  %state.value = load i32, ptr %async.state\n";
+    out_ << "  switch i32 %state.value, label %async.completed [ i32 0, label %bb" << function_.entry;
+    for (const auto& [inst, state] : await_states_) out_ << " i32 " << state << ", label %" << await_labels_.at(inst);
+    out_ << " ]\n";
+    out_ << "async.completed:\n  ret i1 true\n";
+    for (const auto& block : function_.blocks) {
+        out_ << "bb" << block.id << ":\n";
+        for (const auto& inst : block.instructions) instruction(inst);
+        if (!block.terminator) throw std::runtime_error("LLVM codegen: async basic block is missing a terminator");
+        terminator(*block.terminator);
+    }
+    out_ << "}\n\n";
+    async_poll_mode_ = false;
+}
+
+void FunctionEmitter::emitAsyncDestroy() {
+    next_value_ = 0;
+    next_label_ = 0;
+    const std::string qualified = functionKey(function_);
+    const std::string frame_type = asyncFrameSymbol(function_);
+    out_ << "define void @" << module_.symbol(qualified + "$drop") << "(ptr %frame) {\nentry:\n";
+    for (const auto& local : function_.locals) {
+        if (local.type.isUnit()) continue;
+        out_ << "  " << slot(local.id) << " = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 " << asyncLocalField(local.id) << "\n";
+        if (!local.type.isCopy() && !local.type.isReference()) out_ << "  " << dropFlag(local.id) << " = getelementptr inbounds " << frame_type << ", ptr %frame, i32 0, i32 " << asyncDropField(local.id) << "\n";
+    }
+    for (auto it = function_.locals.rbegin(); it != function_.locals.rend(); ++it) {
+        if (it->type.isCopy() || it->type.isReference() || it->type.isUnit()) continue;
+        mir::Instruction drop{.kind = mir::InstructionKind::DropIf, .operands = {mir::Operand{.kind = mir::OperandKind::Local, .local = it->id, .type = it->type}}};
+        emitDrop(drop, true);
+    }
+    out_ << "  call void @free(ptr %frame)\n  ret void\n}\n\n";
+}
+
+void FunctionEmitter::emitAsync() {
+    emitAsyncConstructor();
+    emitAsyncPoll();
+    emitAsyncDestroy();
+}
+
+void FunctionEmitter::emit() {
+    if (function_.is_async) emitAsync();
+    else emitSync();
 }
 
 } // namespace

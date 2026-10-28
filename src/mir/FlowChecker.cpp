@@ -196,6 +196,12 @@ bool isReactorRegistration(const Instruction& instruction) {
            callee.text == "reactor_register_udp";
 }
 
+bool isExecutorSpawn(const Instruction& instruction) {
+    if (instruction.kind != InstructionKind::Call || instruction.operands.empty()) return false;
+    const auto& callee = instruction.operands.front();
+    return callee.kind == OperandKind::Global && callee.text == "executor_spawn";
+}
+
 void addDiagnostic(std::vector<Diagnostic>& diagnostics, SourceSpan span, std::string message) {
     diagnostics.push_back(Diagnostic{.message = std::move(message), .span = span});
 }
@@ -523,6 +529,20 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                 }
             }
 
+            // The bootstrap executor owns spawned frames independently of the current stack.
+            // Until task lifetimes are part of the type system, only futures with no external
+            // borrow provenance may be detached into it.
+            if (isExecutorSpawn(instruction) && instruction.operands.size() >= 3) {
+                const auto& future = instruction.operands[2];
+                if (future.kind == OperandKind::Local) {
+                    const auto found = local_loans.find(future.local);
+                    if (found != local_loans.end() && !found->second.empty()) {
+                        addDiagnostic(diagnostics, instruction.span,
+                                      "executor_spawn requires a non-borrowing Future<unit> in milestone 18");
+                    }
+                }
+            }
+
             transferInstruction(state, instruction);
             if (const auto block_created = pins_created_at.find(block.id); block_created != pins_created_at.end()) {
                 if (const auto at = block_created->second.find(i); at != block_created->second.end()) {
@@ -547,6 +567,14 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
             const auto active = activeLoans(info, live.terminator_live_before, carriers, activated_pins);
             if (block.terminator->kind == TerminatorKind::Return) {
                 checkAvailableUse(function, state, block.terminator->value, block.terminator->span, diagnostics);
+                if (block.terminator->value.kind == OperandKind::Local &&
+                    block.terminator->value.type.kind == sema::TypeKind::Future) {
+                    const auto found = local_loans.find(block.terminator->value.local);
+                    if (found != local_loans.end() && !found->second.empty()) {
+                        addDiagnostic(diagnostics, block.terminator->span,
+                                      "cannot return a Future that borrows a local resource in milestone 18");
+                    }
+                }
                 for (const auto moved : consumedByTerminator(*block.terminator)) {
                     if (hasProtectionForRoot(active, moved)) {
                         if (const Local* local = findLocal(function, moved)) {
