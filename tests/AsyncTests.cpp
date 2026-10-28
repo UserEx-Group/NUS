@@ -39,8 +39,8 @@ int main() {
     using nus::sema::Type;
     using nus::sema::TypeKind;
 
-    if (!Type::future(Type::simple(TypeKind::I32)).isCopy()) fail("Future<i32> should be Copy in the eager milestone 17 representation");
-    if (Type::future(Type::simple(TypeKind::String)).isCopy()) fail("Future<string> must preserve owned payload semantics");
+    if (Type::future(Type::simple(TypeKind::I32)).isCopy()) fail("Future<i32> must be non-Copy because it owns a suspended frame in milestone 18");
+    if (Type::future(Type::simple(TypeKind::String)).isCopy()) fail("Future<string> must preserve owned frame/payload semantics");
 
     if (!valid(R"(
         async fn plus_one(value: i32) -> i32 {
@@ -105,7 +105,7 @@ int main() {
             value
         }
         fn main() {}
-    )", false)) fail("async borrowed returns must be rejected in milestone 17");
+    )", false)) fail("async borrowed returns must be rejected in milestone 18 until task lifetimes are explicit");
 
     std::cout << "async tests passed\n";
     return 0;

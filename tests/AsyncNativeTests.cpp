@@ -92,8 +92,9 @@ int main() {
         }
     )");
 
-    if (ir.find("future") == std::string::npos || ir.find("assert") == std::string::npos) {
-        fail("milestone 17 native IR is missing eager future lowering");
+    if (ir.find("%nus.async.frame.") == std::string::npos ||
+        ir.find("_poll") == std::string::npos || ir.find("nus_future_wait") == std::string::npos) {
+        fail("milestone 18 native IR is missing resumable future state-machine lowering");
     }
 
     const auto base = std::filesystem::temp_directory_path() / "nus-async-native-test";

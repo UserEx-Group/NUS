@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.17.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.18.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -168,3 +168,19 @@ add_test(NAME reactor COMMAND nus_reactor_tests)
 add_executable(nus_reactor_native_tests tests/ReactorNativeTests.cpp)
 target_link_libraries(nus_reactor_native_tests PRIVATE nus_frontend)
 add_test(NAME reactor_native COMMAND nus_reactor_native_tests)
+
+add_executable(nus_executor_tests tests/ExecutorTests.cpp)
+target_link_libraries(nus_executor_tests PRIVATE nus_frontend)
+add_test(NAME executor COMMAND nus_executor_tests)
+
+add_executable(nus_executor_native_tests tests/ExecutorNativeTests.cpp)
+target_link_libraries(nus_executor_native_tests PRIVATE nus_frontend)
+add_test(NAME executor_native COMMAND nus_executor_native_tests)
+
+add_executable(nus_async_network_tests tests/AsyncNetworkTests.cpp)
+target_link_libraries(nus_async_network_tests PRIVATE nus_frontend)
+add_test(NAME async_network COMMAND nus_async_network_tests)
+
+add_executable(nus_async_network_native_tests tests/AsyncNetworkNativeTests.cpp)
+target_link_libraries(nus_async_network_native_tests PRIVATE nus_frontend)
+add_test(NAME async_network_native COMMAND nus_async_network_native_tests)
