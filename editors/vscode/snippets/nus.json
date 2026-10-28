@@ -194,5 +194,43 @@
       "${0}"
     ],
     "description": "Await a non-blocking TCP receive Future"
+  },
+  "Sleep future": {
+    "prefix": "sleepms",
+    "body": [
+      "await sleep_ms(${1:100u32});",
+      "${0}"
+    ],
+    "description": "Suspend the current async task for a monotonic timeout"
+  },
+  "Spawn and join task": {
+    "prefix": "taskspawn",
+    "body": [
+      "let ${1:handle} = task_spawn(&mut ${2:executor}, ${3:task}());",
+      "let ${4:joined} = task_join(&mut ${2:executor}, ${1:handle});",
+      "match ${4:joined} {",
+      "    Some(${5:value}) => ${0:print(${5:value})},",
+      "    None => print(-1),",
+      "};"
+    ],
+    "description": "Spawn a Copy-result task and join it through its owning Executor"
+  },
+  "Borrowing task scope": {
+    "prefix": "taskscope",
+    "body": [
+      "let mut ${1:tasks} = scope_new();",
+      "scope_spawn(&mut ${1:tasks}, ${2:future});",
+      "scope_run(&mut ${1:tasks});",
+      "${0}"
+    ],
+    "description": "Run borrowing Future<unit> tasks inside a structured TaskScope"
+  },
+  "Cancel task": {
+    "prefix": "taskcancel",
+    "body": [
+      "let ${1:requested} = task_cancel(&mut ${2:handle});",
+      "${0}"
+    ],
+    "description": "Request cooperative cancellation of a TaskHandle"
   }
 }

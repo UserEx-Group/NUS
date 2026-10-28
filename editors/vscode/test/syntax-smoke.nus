@@ -68,3 +68,24 @@ fn reactor_smoke(address: &SocketAddr) -> Result<usize, NetworkError> {
     let _ready = reactor_wait(&mut reactor, 0)?;
     ok::<usize, NetworkError>(reactor_len(&reactor))
 }
+async fn m19_worker() -> i32 {
+    await sleep_ms(5u32);
+    42
+}
+
+async fn m19_scoped(value: &mut i32) {
+    await yield_now();
+    *value += 1;
+}
+
+fn m19_structured() {
+    let mut executor = executor_new();
+    let mut handle: TaskHandle<i32> = task_spawn(&mut executor, m19_worker());
+    let _finished = task_finished(&handle);
+    let _joined = task_join(&mut executor, handle);
+
+    let mut value = 0;
+    let mut tasks: TaskScope = scope_new();
+    scope_spawn(&mut tasks, m19_scoped(&mut value));
+    scope_run(&mut tasks);
+}

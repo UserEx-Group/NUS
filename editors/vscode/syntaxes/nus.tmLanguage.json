@@ -179,7 +179,7 @@
         },
         {
           "name": "support.type.builtin.nus",
-          "match": "\\b(?:Vec|VecIter|VecRefIter|VecMutIter|Option|Result|Future|Reactor|Executor|IpAddr|SocketAddr|NetworkError|TcpStream|TcpListener|UdpSocket)\\b"
+          "match": "\\b(?:Vec|VecIter|VecRefIter|VecMutIter|Option|Result|Future|Reactor|Executor|TaskHandle|TaskScope|IpAddr|SocketAddr|NetworkError|TcpStream|TcpListener|UdpSocket)\\b"
         },
         {
           "name": "variable.language.self.nus",
@@ -219,7 +219,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.nus",
-          "match": "\\b(?:print|assert|string_clone|string_len|vec_new|vec_push|vec_len|vec_get|some|none|ok|err|block_on|ipv4|socket_addr|socket_port|network_error_code|network_error_reason|dns_resolve_ipv4|tcp_connect|tcp_listen|tcp_accept|tcp_set_nodelay|tcp_set_timeout|tcp_set_nonblocking|tcp_listener_set_nonblocking|tcp_send|tcp_receive|udp_bind|udp_set_nonblocking|udp_send_to|udp_receive|reactor_new|reactor_len|reactor_register_tcp|reactor_register_listener|reactor_register_udp|reactor_wait|reactor_event_token|reactor_event_readable|reactor_event_writable|yield_now|executor_new|executor_spawn|executor_run|tcp_accept_async|tcp_receive_async|tcp_send_async)\\b(?=\\s*(?:::<[^>]+>)?\\s*\\()"
+          "match": "\\b(?:print|assert|string_clone|string_len|vec_new|vec_push|vec_len|vec_get|some|none|ok|err|block_on|ipv4|socket_addr|socket_port|network_error_code|network_error_reason|dns_resolve_ipv4|tcp_connect|tcp_listen|tcp_accept|tcp_set_nodelay|tcp_set_timeout|tcp_set_nonblocking|tcp_listener_set_nonblocking|tcp_send|tcp_receive|udp_bind|udp_set_nonblocking|udp_send_to|udp_receive|reactor_new|reactor_len|reactor_register_tcp|reactor_register_listener|reactor_register_udp|reactor_wait|reactor_event_token|reactor_event_readable|reactor_event_writable|yield_now|sleep_ms|executor_new|executor_spawn|executor_run|task_spawn|task_join|task_cancel|task_finished|scope_new|scope_spawn|scope_run|scope_cancel_all|tcp_accept_async|tcp_receive_async|tcp_send_async)\\b(?=\\s*(?:::<[^>]+>)?\\s*\\()"
         },
         {
           "name": "entity.name.function.call.nus",
