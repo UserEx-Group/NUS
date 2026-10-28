@@ -105,8 +105,33 @@ async fn plus_one(value: i32) -> i32 {
 }
 
 async fn async_demo() -> i32 {
+    await yield_now();
     let first = await plus_one(40);
     await plus_one(first)
+}
+
+async fn task_a() {
+    await yield_now();
+    print("A");
+}
+
+async fn task_b() {
+    print("B1");
+    await yield_now();
+    print("B2");
+}
+
+fn executor_demo() {
+    let mut executor = executor_new();
+    executor_spawn(&mut executor, task_a());
+    executor_spawn(&mut executor, task_b());
+    executor_run(&mut executor);
+}
+
+async fn accept_async_native(listener: &mut TcpListener) -> Result<i32, NetworkError> {
+    let accepted = await tcp_accept_async(listener);
+    let stream = accepted?;
+    ok::<i32, NetworkError>(1)
 }
 
 fn reactor_probe(address: &SocketAddr) -> Result<usize, NetworkError> {
@@ -196,6 +221,7 @@ fn main() {
     }
 
     print(block_on(async_demo()));
+    executor_demo();
 
     packet.consume();
 }

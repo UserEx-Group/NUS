@@ -177,8 +177,14 @@ The Windows native toolchain adds `-lws2_32` automatically. The supported Window
 
 The backend now lowers `gethostbyname`/`ntohl`, `listen`, `accept` and `setsockopt` in addition to the M15 socket calls. Common `errno`/Winsock failures are mapped internally to portable NUS network-reason codes. Windows GNU targets continue to link `ws2_32`.
 
-## Milestone 17 async/reactor lowering
+## Milestone 18 resumable async lowering
 
-`async fn` returns an explicit `Future<T>` at HIR/MIR/LLVM boundaries. `future.ready` wraps a completed return payload, while MIR `await` asserts the eager-ready flag and transfers the payload out with normal move/drop semantics. `block_on` is the synchronous extraction bridge. `?` early returns inside async functions are wrapped in the function's Future before the MIR return terminator.
+Each `async fn` emits a constructor, a `poll(frame, out) -> i1` callback, and a destroy callback. The constructor allocates an async-frame struct containing the common wait header plus MIR locals/drop flags. The poll callback switches on the saved continuation state; a pending MIR `await` stores its state and copies the child Future's wait metadata into the parent header before returning `false`.
 
-The reactor backend emits a NUS-owned registration array and helper lowering for `poll` on POSIX or `WSAPoll` on Windows. Non-blocking mode uses `fcntl(F_GETFL/F_SETFL, O_NONBLOCK)` on POSIX and `ioctlsocket(FIONBIO)` on Windows. The Reactor does not expose native `pollfd` layouts in the NUS ABI.
+`block_on` repeatedly invokes the callback. When a poll returns pending, `nus_future_wait` sleeps on the frame's wait metadata (`poll` on POSIX, `WSAPoll` on Windows) and retries. `yield_now` uses a tiny frame that returns pending exactly once.
+
+The native `Executor` stores `{frame,poll,drop}` task records, round-robin polls them, removes ready tasks, and sleeps using the first pending frame when no task made progress.
+
+Async TCP constructors (`tcp_accept_async`, `tcp_receive_async`, `tcp_send_async`) set the native handle non-blocking and create operation-specific frames. Their poll callbacks retry the syscall; portable would-block/timeout reason `1` means `Pending`, while success/error writes `Result<...>` to the Future output and returns ready.
+
+The explicit M17 `Reactor` lowering remains based on NUS-owned entries translated to `pollfd`/`WSAPOLLFD` at the OS boundary.

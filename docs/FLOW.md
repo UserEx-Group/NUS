@@ -104,3 +104,7 @@ Milestone 14 removes the `T: Copy` restriction for consuming iteration. Each non
 Reactor registrations introduce an internal third lifetime relation in addition to shared and mutable loans: a **resource pin**. A pin is carried by the Reactor and rooted at the registered socket owner. It prevents moves, reassignment and drop of that owner while the relevant Reactor remains live, but does not conflict with normal shared or mutable borrows used for socket I/O.
 
 Pins are activated only after the registration call's program point and participate in forward CFG dataflow. Moving a Reactor propagates its pins to the new Reactor owner. M17 requires the owners behind registration references to be locally traceable; interprocedural registration effects are deferred.
+
+## Milestone 18 Future loan provenance
+
+`Future<T>` is a borrow-carrying MIR type. Calls that construct async socket futures propagate the loan identities of their reference arguments into the Future local, so NLL keeps sockets/buffers protected for exactly as long as that Future remains live. `executor_spawn` rejects a Future carrying external loans because the bootstrap executor has no explicit task lifetime parameter yet. Returning a borrowing Future that originates from a local owner is likewise rejected.

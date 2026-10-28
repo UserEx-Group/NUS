@@ -181,3 +181,7 @@ Sockets can now opt into non-blocking mode with `tcp_set_nonblocking`, `tcp_list
 `Reactor` is an owned runtime value that stores registrations and waits for readiness with `poll()` on POSIX or `WSAPoll()` on Windows. `reactor_register_tcp`, `reactor_register_listener` and `reactor_register_udp` attach a user token and desired read/write interests; `reactor_wait` fills readiness flags queried through the `reactor_event_*` functions.
 
 A registered resource is protected by an internal NLL resource pin. The pin prevents move/drop of the socket owner while the Reactor can reference its OS handle but intentionally allows `&mut` I/O after readiness. Reactor/poll failures use network operation code `11`.
+
+## Milestone 18 async TCP operations
+
+The first socket futures are `tcp_accept_async(&mut TcpListener)`, `tcp_receive_async(&mut TcpStream, usize)`, and `tcp_send_async(&mut TcpStream, &Vec<u8>)`. They force the underlying socket into non-blocking mode and return a suspendable `Future<Result<...>>`. A would-block result is represented as `Pending` and records readable/writable interest in the Future frame; `block_on` or a parent async function waits with the platform poller before retrying. Socket/buffer arguments remain borrowed until the Future's last live use.

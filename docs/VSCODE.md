@@ -74,3 +74,7 @@ npm run validate
 ```
 
 Then open the directory in VS Code and press `F5`.
+
+## Milestone 18
+
+The grammar highlights `Executor` plus the resumable async/runtime builtins `yield_now`, `executor_new`, `executor_spawn`, `executor_run`, `tcp_accept_async`, `tcp_receive_async`, and `tcp_send_async`. The extension remains compatible with VS Code 1.32+.

@@ -88,8 +88,12 @@ Network receive buffers are ordinary owned `Vec<u8>` allocations and therefore r
 
 `TcpListener` joins `TcpStream` and `UdpSocket` as an owned runtime resource. Drop glue closes only the live owner. DNS results and `NetworkError` are value types and do not allocate.
 
-## Milestone 17 Future and Reactor resources
+## Milestone 18 Future, Executor and Reactor resources
 
-`Future<T>` is currently an eager ready-value container. A non-Copy payload remains owned by the Future until `await`/`block_on` transfers it or drop glue destroys it.
+A pending `Future<T>` owns a heap coroutine frame and its destroy callback. A ready Future owns its payload. `await`/`block_on` transfer the payload and clear the Future owner's drop state; dropping a pending Future runs frame-specific cleanup for every still-live owned local before freeing the frame.
 
-`Reactor` owns its dynamically allocated registration array and frees that storage on drop. It does not own registered sockets; MIR resource pins ensure those socket owners cannot move or drop while a live Reactor can still reference their native handles.
+`Executor` owns a dynamic queue of task frame/poll/drop triples and destroys every remaining task if the executor itself is dropped before `executor_run` finishes. `yield_now` supplies a deterministic one-yield Future for cooperative scheduling.
+
+Async TCP futures borrow their socket (and send buffers) rather than owning them. MIR loan provenance keeps those resources alive and prevents incompatible mutation/moves until the Future's last use. Detached executor tasks must be non-borrowing in M18.
+
+`Reactor` continues to own only its registration array, not registered sockets; MIR resource pins keep those socket owners stable while the Reactor can reference their handles.

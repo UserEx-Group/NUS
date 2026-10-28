@@ -1,87 +1,100 @@
-# NUS Async and Reactor Foundations — Milestone 17
+# NUS Resumable Async Runtime — Milestone 18
 
-Milestone 17 introduces two related but deliberately separate foundations: a real native readiness reactor and the first compiler/runtime representation of `async fn`, `Future<T>` and `await`.
+Milestone 18 turns the async syntax introduced in M17 into resumable execution. `async fn` is lowered to a heap-owned coroutine frame, `await` can return `Pending`, and `block_on` / `Executor` repeatedly poll the frame until it reaches `Ready`.
 
-## Async functions
-
-An async function has a normal source-level result type, but callers receive `Future<T>`:
+## Resumable async functions
 
 ```nus
-async fn plus_one(value: i32) -> i32 {
+async fn suspended(value: i32) -> i32 {
+    await yield_now();
     value + 1
 }
 
-async fn compute() -> i32 {
-    let first = await plus_one(40);
-    await plus_one(first)
-}
-
 fn main() {
-    print(block_on(compute()));
+    print(block_on(suspended(41)));
 }
 ```
 
-In Milestone 17 these futures are **eager/ready futures**. Calling `compute()` executes its body immediately and returns a ready `Future<i32>`. `await` validates and unwraps that ready future; `block_on` is the synchronous bridge used by non-async code.
+An async function is emitted as three native pieces:
 
-This is intentionally not yet a task executor or coroutine state machine. No source-level async function suspends and resumes in M17. The compiler does, however, carry `Future<T>` explicitly through semantic analysis, HIR, MIR and LLVM, which provides the representation boundary needed by a later state-machine/executor milestone.
+```text
+constructor(args...) -> Future<T>
+poll(frame, out)     -> bool ready
+drop(frame)          -> unit
+```
 
-`?` works inside async functions. An early `Err`/`None` path is wrapped into the async function's `Future<Result<...>>` / `Future<Option<...>>`, preserving ownership before returning.
+The constructor allocates the frame and captures parameters. The poll function switches on the saved continuation state. A pending `await` stores its continuation state and returns `false`; the next poll resumes directly at that await point. The drop callback destroys every still-live owned local before freeing the frame.
 
-Current async restrictions include: `main` cannot be async, async methods are deferred, and an async function cannot return a borrowed reference.
+`Future<T>` is therefore non-`Copy` in M18 even when `T` is `Copy`.
 
-## Non-blocking sockets
+## Future ABI
 
-Owned socket resources can be switched to non-blocking mode:
+A Future carries either an immediate ready value or ownership of a suspended frame:
+
+```text
+Future<T> {
+    bool ready,
+    T value,          // omitted for unit
+    ptr frame,
+    ptr poll,
+    ptr destroy,
+}
+```
+
+Every suspendable frame starts with a common wait header containing continuation state, native wait handle/events, an optional Reactor pointer, and timeout metadata. `block_on` and the executor use that header to sleep rather than busy-spin.
+
+## Cooperative suspension
+
+`yield_now() -> Future<unit>` always returns `Pending` once before becoming ready. It exists primarily as the bootstrap scheduling primitive and as a deterministic test that a coroutine really leaves and re-enters its frame.
 
 ```nus
-tcp_set_nonblocking(&mut stream, true)?;
-tcp_listener_set_nonblocking(&mut listener, true)?;
-udp_set_nonblocking(&mut socket, true)?;
+async fn task() {
+    print("before");
+    await yield_now();
+    print("after");
+}
 ```
 
-POSIX uses `fcntl(F_GETFL/F_SETFL, O_NONBLOCK)`. Windows GNU uses Winsock `ioctlsocket(FIONBIO)`.
+## Executor
+
+`Executor` is an owned task queue:
+
+```nus
+let mut executor = executor_new();
+executor_spawn(&mut executor, task_a());
+executor_spawn(&mut executor, task_b());
+executor_run(&mut executor);
+```
+
+Each task entry owns a frame/poll/drop triple. The executor polls tasks cooperatively, removes completed tasks, and waits on the first pending task's wait metadata when every task is pending.
+
+Detached tasks must currently be non-borrowing `Future<unit>` values. A Future carrying a loan to a stack-owned socket/buffer is rejected by `executor_spawn`; task lifetimes are not yet encoded in the public type system.
+
+## Async TCP operations
+
+M18 adds genuinely pending TCP futures:
+
+```nus
+let accepted = await tcp_accept_async(&mut listener);
+let stream = accepted?;
+
+let received = await tcp_receive_async(&mut stream, 4096usize);
+let bytes = received?;
+
+let sent = await tcp_send_async(&mut stream, &bytes);
+let count = sent?;
+```
+
+These constructors switch the native socket to non-blocking mode and create a Future frame with the corresponding read/write readiness interest. Poll callbacks attempt the system call immediately; `EAGAIN` / `WSAEWOULDBLOCK` returns `Pending`, while success or a terminal error returns `Ready(Result<...>)`.
+
+`block_on` and suspended parent futures use `poll()` on POSIX or `WSAPoll()` on Windows to wait for the handle before polling again.
+
+The Future carries MIR loan provenance from its socket and, for send, its buffer. Those resources therefore cannot be moved or incompatibly mutated while the Future remains live.
 
 ## Reactor
 
-`Reactor` is an owned, non-`Copy` runtime value. It stores NUS-owned registration records and converts those records to native polling structures only at the OS boundary.
+The M17 `Reactor` remains available for explicit readiness-driven code. It owns registrations but not sockets, and resource pins prevent registered socket owners from moving/dropping while the Reactor is live. M18 futures can also place Reactor metadata in the common wait header, although the first built-in async TCP operations wait directly on their socket handles.
 
-```nus
-let mut reactor = reactor_new()?;
-reactor_register_listener(&mut reactor, &listener, 7usize)?;
-let ready = reactor_wait(&mut reactor, 1000)?;
-```
+## Current boundaries
 
-Available registration functions are:
-
-```text
-reactor_register_tcp
-reactor_register_listener
-reactor_register_udp
-```
-
-Each registration has a user token. After `reactor_wait`, readiness can be inspected with:
-
-```text
-reactor_len
-reactor_event_token
-reactor_event_readable
-reactor_event_writable
-```
-
-The host backend uses `poll()` on POSIX and `WSAPoll()` on Windows. A zero timeout is a non-blocking poll.
-
-## Resource pins
-
-A reactor stores OS handles rather than owning the corresponding NUS socket objects. To keep this safe, registration creates an internal MIR/NLL **resource pin**.
-
-A pin prevents the registered `TcpStream`, `TcpListener` or `UdpSocket` from being moved, reassigned or dropped while the live Reactor can still reference its handle. Unlike a normal shared borrow, a pin does **not** prevent ordinary mutable I/O such as `tcp_receive(&mut stream)` or `tcp_accept(&mut listener)`.
-
-The pin follows Reactor moves inside the function and ends at the Reactor's last live use/drop. M17 requires registration arguments to have directly traceable local owners; hiding registration behind a helper that receives only borrowed Reactor/socket parameters is rejected until interprocedural resource effects are represented explicitly.
-
-## Portable errors
-
-Reactor/poll failures use networking operation code `11`. Platform-specific `errno`/Winsock values remain backend details and are mapped to the existing portable `NetworkError` reason codes.
-
-## Next step
-
-The intended follow-up is to lower async functions into resumable state machines and drive pending futures from the Reactor. That will turn the eager `Future<T>` representation introduced here into true suspended asynchronous execution without changing the source-level `async fn` / `await` syntax.
+M18 is deliberately a cooperative single-threaded runtime. It does not yet provide multithreaded work stealing, timers/sleep futures, cancellation tokens, task handles/join values, async methods, explicit task lifetimes, or an async `main`. The source-level `async fn` / `await` representation is now resumable, so those features can be layered on the state-machine ABI rather than replacing it.

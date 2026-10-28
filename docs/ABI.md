@@ -123,20 +123,24 @@ The generated backend materializes a platform `sockaddr_in` only at the system-c
 
 `NetworkError` is now `{ i32 operation, i32 reason }` (8 bytes, align 4). `TcpListener` is one normalized 64-bit native handle, matching `TcpStream`/`UdpSocket` ownership layout.
 
-## Milestone 17 Future and Reactor ABI
+## Milestone 18 Future, Executor and Reactor ABI
 
-The eager bootstrap future uses a ready flag plus payload:
-
-```text
-Future<T> { bool ready, T value }
-```
-
-`Future<unit>` stores only the ready flag. Payload alignment determines aggregate padding; on x86-64 `Future<i32>` is 8 bytes aligned to 4.
-
-`Reactor` uses three machine words:
+`Future<T>` is now a resumable owner rather than an eager pair:
 
 ```text
-Reactor { ptr entries, usize len, usize cap }
+Future<T> { bool ready, T payload, ptr frame, ptr poll, ptr destroy }
+Future<unit> { bool ready, ptr frame, ptr poll, ptr destroy }
 ```
 
-On x86-64 it is 24 bytes aligned to 8. Individual registration records are NUS-owned and are translated to platform `pollfd`/`WSAPOLLFD` arrays only for `reactor_wait`.
+On x86-64 both `Future<i32>` and `Future<unit>` are 32 bytes aligned to 8. Pending futures own the heap frame. Ready futures own their payload when that payload is non-`Copy`.
+
+All suspendable runtime frames begin with an internal common header `{ i32 state, i64 wait_handle, i16 wait_events, ptr wait_reactor, i32 wait_timeout }`; this header is runtime-private and is not a source-visible NUS type.
+
+`Executor` and `Reactor` each use three machine words:
+
+```text
+Executor { ptr tasks, usize len, usize cap }
+Reactor  { ptr entries, usize len, usize cap }
+```
+
+Both are 24 bytes aligned to 8 on x86-64. Executor task entries own `{frame, poll, destroy}` callbacks. Async TCP helper frames additionally store their normalized 64-bit socket handle plus operation-specific data.
