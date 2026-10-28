@@ -108,3 +108,7 @@ Pins are activated only after the registration call's program point and particip
 ## Milestone 18 Future loan provenance
 
 `Future<T>` is a borrow-carrying MIR type. Calls that construct async socket futures propagate the loan identities of their reference arguments into the Future local, so NLL keeps sockets/buffers protected for exactly as long as that Future remains live. `executor_spawn` rejects a Future carrying external loans because the bootstrap executor has no explicit task lifetime parameter yet. Returning a borrowing Future that originates from a local owner is likewise rejected.
+
+## Milestone 19 scoped task loans
+
+`scope_spawn` is the structured counterpart to detached spawning. When its Future carries MIR loan provenance, the FlowChecker creates synthetic scoped loans rooted in the same owners and carried by the `TaskScope`. They activate after the spawn call and remain live according to the scope local's NLL liveness, preventing move, reassignment or conflicting borrows of captured locals until the scope's last use. Detached `task_spawn` continues to reject Futures carrying external loans.

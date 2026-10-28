@@ -128,6 +128,47 @@ fn executor_demo() {
     executor_run(&mut executor);
 }
 
+async fn joined_answer() -> i32 {
+    await sleep_ms(5u32);
+    42
+}
+
+async fn joined_error() -> Result<i32, i32> {
+    await yield_now();
+    err::<i32, i32>(7)
+}
+
+async fn scoped_add_one(value: &mut i32) {
+    await yield_now();
+    *value += 1;
+}
+
+fn structured_concurrency_demo() {
+    let mut executor = executor_new();
+    let handle = task_spawn(&mut executor, joined_answer());
+    let joined = task_join(&mut executor, handle);
+    match joined {
+        Some(value) => print(value),
+        None => print(-1),
+    };
+
+    let error_handle = task_spawn(&mut executor, joined_error());
+    let error_joined = task_join(&mut executor, error_handle);
+    match error_joined {
+        Some(result) => match result {
+            Ok(value) => print(value),
+            Err(error) => print(-error),
+        },
+        None => print(-2),
+    };
+
+    let mut number = 41;
+    let mut tasks = scope_new();
+    scope_spawn(&mut tasks, scoped_add_one(&mut number));
+    scope_run(&mut tasks);
+    print(number);
+}
+
 async fn accept_async_native(listener: &mut TcpListener) -> Result<i32, NetworkError> {
     let accepted = await tcp_accept_async(listener);
     let stream = accepted?;
@@ -222,6 +263,7 @@ fn main() {
 
     print(block_on(async_demo()));
     executor_demo();
+    structured_concurrency_demo();
 
     packet.consume();
 }

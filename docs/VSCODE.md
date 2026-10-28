@@ -1,4 +1,4 @@
-# VS Code Language Support — Milestone 16.5 / updated for M17
+# VS Code Language Support — Milestone 16.5 / updated through M19
 
 The official bootstrap editor integration lives in `editors/vscode`.
 
@@ -75,6 +75,6 @@ npm run validate
 
 Then open the directory in VS Code and press `F5`.
 
-## Milestone 18
+## Milestone 19
 
-The grammar highlights `Executor` plus the resumable async/runtime builtins `yield_now`, `executor_new`, `executor_spawn`, `executor_run`, `tcp_accept_async`, `tcp_receive_async`, and `tcp_send_async`. The extension remains compatible with VS Code 1.32+.
+The grammar now also highlights `TaskHandle`, `TaskScope`, `sleep_ms`, `task_spawn`, `task_join`, `task_cancel`, `task_finished`, `scope_new`, `scope_spawn`, `scope_run`, and `scope_cancel_all`. Snippets cover timer sleeps, joined tasks and borrowing task scopes. The extension remains compatible with VS Code 1.32+.

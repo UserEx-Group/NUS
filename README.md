@@ -4,9 +4,9 @@ NUS is an experimental network-oriented systems programming language focused on 
 
 > **High-level by default. Low-level by choice. Safe by default.**
 
-## Milestone 18 — Resumable Futures + Executor + Async TCP
+## Milestone 19 — Structured Concurrency + Timers
 
-Milestone 18 turns `async fn` into a real heap-backed state machine. `await` can suspend and resume, `Future<T>` owns a coroutine frame, `block_on` waits through the platform poller, and the new cooperative `Executor` schedules multiple `Future<unit>` tasks. TCP accept/send/receive now also have non-blocking async futures driven by `poll` on POSIX or `WSAPoll` on Windows. The bundled VS Code extension remains compatible with VS Code 1.32+.
+Milestone 19 adds structured task ownership on top of the resumable async runtime: monotonic `sleep_ms`, `TaskHandle<T>` spawn/join/cancellation, `TaskScope` for borrowing futures, stable executor identity checks, and an aggregated scheduler wait that combines socket readiness with timer deadlines. The runtime remains cooperative and single-threaded. The bundled VS Code extension remains compatible with VS Code 1.32+.
 
 ```text
 .nus
@@ -284,7 +284,7 @@ fn main() {
 }
 ```
 
-M18 `Future<T>` values are non-`Copy` owners of resumable frames. `await` stores continuation state when a child future is pending; `block_on` and `Executor` poll and wait until it becomes ready. `tcp_accept_async`, `tcp_receive_async`, and `tcp_send_async` connect those frames to native socket readiness. `Reactor` remains available for explicit polling. See `docs/ASYNC_REACTOR.md`.
+`Future<T>` values are non-`Copy` owners of resumable frames. `await` stores continuation state when a child future is pending; `block_on` and `Executor` poll and wait until it becomes ready. M19 adds timer-aware waiting, `task_spawn` / `task_join`, cooperative cancellation, and `TaskScope` for futures that borrow stack locals. `tcp_accept_async`, `tcp_receive_async`, and `tcp_send_async` remain integrated with native socket readiness. See `docs/ASYNC_REACTOR.md` and `docs/STRUCTURED_CONCURRENCY.md`.
 
 ## Compiler modes
 
@@ -301,7 +301,7 @@ M18 `Future<T>` values are non-`Copy` owners of resumable frames. `await` stores
 
 ## Tests
 
-Milestone 18 contains thirty-six suites:
+Milestone 19 contains forty suites:
 
 ```text
 lexer
@@ -340,14 +340,18 @@ executor
 executor_native
 async_network
 async_network_native
+structured_concurrency
+structured_concurrency_native
+timers
+timers_native
 ```
 
 The native suites now also resolve `localhost`, create and drop a real loopback TCP listener on an ephemeral port, and compile the `accept`, `setsockopt`, DNS and richer error paths through LLVM and the host linker.
 
 ## Current boundaries
 
-Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs, optimized vector growth, IPv6, multi-address DNS results, peer/local endpoint queries, UDP sender metadata, deregistration, true suspended async state machines/executor scheduling, async methods and TLS.
+Still deferred: named lifetime parameters/bounds, reference fields, arbitrary returned field/index projections, lifetime-bearing user-defined aggregates, user generic structs/enums, default trait methods, generic trait methods, `where` clauses, supertraits, associated constants, associated-type equality constraints, trait objects/dynamic dispatch, full generic-impl overlap/coherence checking, non-Copy payload bindings in `match`, user-defined `Drop`, allocator APIs, optimized vector growth, IPv6, multi-address DNS results, peer/local endpoint queries, UDP sender metadata, deregistration, multithreaded/work-stealing execution, non-Copy task results, nominal task lifetimes, panic propagation, source-level structured-concurrency sugar, async methods and TLS.
 
 See [`docs/NETWORKING.md`](docs/NETWORKING.md), [`docs/TRAITS_ITERATORS.md`](docs/TRAITS_ITERATORS.md), [`docs/ENUMS.md`](docs/ENUMS.md), [`docs/GENERICS.md`](docs/GENERICS.md), [`docs/ABI.md`](docs/ABI.md), [`docs/RUNTIME.md`](docs/RUNTIME.md), [`docs/CODEGEN.md`](docs/CODEGEN.md) and [`docs/FLOW.md`](docs/FLOW.md).
 
-For lifetime rules see `docs/LIFETIMES.md`; for sockets see `docs/NETWORKING.md`; for M17 async/reactor semantics see `docs/ASYNC_REACTOR.md`.
+For lifetime rules see `docs/LIFETIMES.md`; for sockets see `docs/NETWORKING.md`; for resumable async/reactor semantics see `docs/ASYNC_REACTOR.md`; for M19 task ownership, timers and scopes see `docs/STRUCTURED_CONCURRENCY.md`.

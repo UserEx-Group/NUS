@@ -144,3 +144,7 @@ Reactor  { ptr entries, usize len, usize cap }
 ```
 
 Both are 24 bytes aligned to 8 on x86-64. Executor task entries own `{frame, poll, destroy}` callbacks. Async TCP helper frames additionally store their normalized 64-bit socket handle plus operation-specific data.
+
+## Milestone 19 structured-concurrency ABI
+
+`TaskHandle<T>` is one pointer (8 bytes, align 8 on x86-64) referring to refcounted shared task state. `TaskScope` retains the three-word queue layout (24 bytes). `Executor` gains a stable `i64` identity field and is therefore 32 bytes aligned to 8 on x86-64: `{ ptr tasks, usize len, usize cap, i64 id }`. The identity is copied with normal Executor moves and is recorded in task shared state so `task_join` can reject a different executor safely. `Option<unit>` is represented as `{ i1 }`, which allows `TaskHandle<unit>` to join without emitting a `void` payload field.

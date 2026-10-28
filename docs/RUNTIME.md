@@ -97,3 +97,7 @@ A pending `Future<T>` owns a heap coroutine frame and its destroy callback. A re
 Async TCP futures borrow their socket (and send buffers) rather than owning them. MIR loan provenance keeps those resources alive and prevents incompatible mutation/moves until the Future's last use. Detached executor tasks must be non-borrowing in M18.
 
 `Reactor` continues to own only its registration array, not registered sockets; MIR resource pins keep those socket owners stable while the Reactor can reference their handles.
+
+## Milestone 19 task runtime and timers
+
+The executor queue can now attach optional refcounted shared state to an entry. `task_spawn` creates that state, `task_join` drives the owning executor until the target is finished, and cancellation marks the state so the scheduler destroys the frame at the next scan. Executor IDs prevent cross-executor joins. `sleep_ms` uses a monotonic absolute deadline and publishes a remaining timeout through the common Future header. Scheduler waiting aggregates every socket handle and the minimum pending timer into one `poll` / `WSAPoll` call. `TaskScope` reuses the queue runtime but owns borrowing `Future<unit>` tasks and destroys unfinished frames on cancellation/drop.

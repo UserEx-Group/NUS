@@ -183,8 +183,12 @@ Each `async fn` emits a constructor, a `poll(frame, out) -> i1` callback, and a 
 
 `block_on` repeatedly invokes the callback. When a poll returns pending, `nus_future_wait` sleeps on the frame's wait metadata (`poll` on POSIX, `WSAPoll` on Windows) and retries. `yield_now` uses a tiny frame that returns pending exactly once.
 
-The native `Executor` stores `{frame,poll,drop}` task records, round-robin polls them, removes ready tasks, and sleeps using the first pending frame when no task made progress.
+The native `Executor` stores task frame/poll/drop records, round-robin polls them, removes ready tasks, and aggregates pending wait metadata before sleeping when no task made progress.
 
 Async TCP constructors (`tcp_accept_async`, `tcp_receive_async`, `tcp_send_async`) set the native handle non-blocking and create operation-specific frames. Their poll callbacks retry the syscall; portable would-block/timeout reason `1` means `Pending`, while success/error writes `Result<...>` to the Future output and returns ready.
 
 The explicit M17 `Reactor` lowering remains based on NUS-owned entries translated to `pollfd`/`WSAPOLLFD` at the OS boundary.
+
+## Milestone 19 task handles, timers and scopes
+
+LLVM lowering adds monotonic `nus_now_ms`, a deadline-based sleep Future, refcounted task shared state, `nus_executor_run_until`, cancellation paths and aggregated timer/socket waiting. Executors receive stable IDs at `executor_new`; `task_spawn` records the ID and `task_join` asserts equality before driving the queue. POSIX timers use `clock_gettime(CLOCK_MONOTONIC)` while Windows uses `GetTickCount64`; readiness remains `poll` / `WSAPoll`. `TaskScope` shares the queue engine but does not expose join handles.

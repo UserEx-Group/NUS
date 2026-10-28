@@ -66,7 +66,7 @@ executor_spawn(&mut executor, task_b());
 executor_run(&mut executor);
 ```
 
-Each task entry owns a frame/poll/drop triple. The executor polls tasks cooperatively, removes completed tasks, and waits on the first pending task's wait metadata when every task is pending.
+Each task entry owns a frame/poll/drop triple. The executor polls tasks cooperatively, removes completed tasks, and aggregates pending socket handles when every task is pending.
 
 Detached tasks must currently be non-borrowing `Future<unit>` values. A Future carrying a loan to a stack-owned socket/buffer is rejected by `executor_spawn`; task lifetimes are not yet encoded in the public type system.
 
@@ -98,3 +98,7 @@ The M17 `Reactor` remains available for explicit readiness-driven code. It owns 
 ## Current boundaries
 
 M18 is deliberately a cooperative single-threaded runtime. It does not yet provide multithreaded work stealing, timers/sleep futures, cancellation tokens, task handles/join values, async methods, explicit task lifetimes, or an async `main`. The source-level `async fn` / `await` representation is now resumable, so those features can be layered on the state-machine ABI rather than replacing it.
+
+## Milestone 19 integration
+
+M19 keeps the M18 state-machine ABI and extends the scheduler rather than replacing it. `sleep_ms` contributes a timeout to the same common Future wait header used by socket futures. When all tasks are pending, the Executor now aggregates all socket handles and the minimum timer timeout before one `poll` / `WSAPoll` wait. `TaskHandle<T>` adds join/cancel observation for Copy results, while `TaskScope` gives borrowing `Future<unit>` values a structured lifetime boundary. See `STRUCTURED_CONCURRENCY.md`.
