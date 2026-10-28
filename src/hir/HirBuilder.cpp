@@ -33,6 +33,8 @@ sema::Type primitiveType(std::string_view name) {
     if (name == "TcpListener") return Type::simple(TypeKind::TcpListener);
     if (name == "UdpSocket") return Type::simple(TypeKind::UdpSocket);
     if (name == "Reactor") return Type::simple(TypeKind::Reactor);
+    if (name == "Executor") return Type::simple(TypeKind::Executor);
+    if (name == "TaskScope") return Type::simple(TypeKind::TaskScope);
     return Type::simple(TypeKind::Unknown);
 }
 
@@ -510,6 +512,8 @@ sema::Type HirBuilder::lowerTypeRef(const ast::TypeRef& type) const {
         base = sema::Type::result(lowerTypeRef(type.generic_arguments[0]), lowerTypeRef(type.generic_arguments[1]));
     } else if (name == "Future" && type.generic_arguments.size() == 1) {
         base = sema::Type::future(lowerTypeRef(type.generic_arguments.front()));
+    } else if (name == "TaskHandle" && type.generic_arguments.size() == 1) {
+        base = sema::Type::taskHandle(lowerTypeRef(type.generic_arguments.front()));
     } else if (base.kind == sema::TypeKind::Unknown) {
         if (const auto found = enum_types_.find(name); found != enum_types_.end()) base = found->second;
         else base = sema::Type::structure(name);
@@ -530,6 +534,7 @@ sema::Type HirBuilder::substituteType(const sema::Type& type) const {
     if (type.kind == sema::TypeKind::VecMutIter && type.element) return sema::Type::borrowedVectorIterator(substituteType(*type.element), true);
     if (type.kind == sema::TypeKind::Option && type.element) return sema::Type::option(substituteType(*type.element));
     if (type.kind == sema::TypeKind::Future && type.element) return sema::Type::future(substituteType(*type.element));
+    if (type.kind == sema::TypeKind::TaskHandle && type.element) return sema::Type::taskHandle(substituteType(*type.element));
     if (type.kind == sema::TypeKind::Array && type.element) return sema::Type::array(substituteType(*type.element), type.array_length);
     if (type.kind == sema::TypeKind::Slice && type.element) return sema::Type::slice(substituteType(*type.element));
     if (type.kind == sema::TypeKind::Range && type.element) return sema::Type::range(substituteType(*type.element));

@@ -43,6 +43,7 @@ std::optional<TypeKind> simpleTypeKind(std::string_view name) {
     if (name == "UdpSocket") return TypeKind::UdpSocket;
     if (name == "Reactor") return TypeKind::Reactor;
     if (name == "Executor") return TypeKind::Executor;
+    if (name == "TaskScope") return TypeKind::TaskScope;
     return std::nullopt;
 }
 
@@ -263,6 +264,7 @@ void SemanticAnalyzer::registerBuiltins() {
     const Type udp_socket_type = Type::simple(TypeKind::UdpSocket);
     const Type reactor_type = Type::simple(TypeKind::Reactor);
     const Type executor_type = Type::simple(TypeKind::Executor);
+    const Type task_scope_type = Type::simple(TypeKind::TaskScope);
     const Type bytes_buffer_type = Type::vector(u8_type);
     const Type vec_i32 = Type::vector(i32_type);
 
@@ -312,6 +314,12 @@ void SemanticAnalyzer::registerBuiltins() {
     builtin("executor_new", {}, executor_type);
     builtin("executor_spawn", {Type::reference(executor_type, true), Type::future(unitType())}, unitType());
     builtin("executor_run", {Type::reference(executor_type, true)}, unitType());
+    // Milestone 19: structured concurrency, cooperative cancellation, and timers.
+    builtin("sleep_ms", {Type::simple(TypeKind::U32)}, Type::future(unitType()));
+    builtin("scope_new", {}, task_scope_type);
+    builtin("scope_spawn", {Type::reference(task_scope_type, true), Type::future(unitType())}, unitType());
+    builtin("scope_run", {Type::reference(task_scope_type, true)}, unitType());
+    builtin("scope_cancel_all", {Type::reference(task_scope_type, true)}, unitType());
     // Milestone 18: socket operations represented as genuinely suspendable futures.
     builtin("tcp_accept_async", {Type::reference(tcp_listener_type, true)},
             Type::future(Type::result(tcp_stream_type, network_error_type)));
@@ -341,6 +349,18 @@ void SemanticAnalyzer::registerBuiltins() {
     registerGenericBuiltin("ok", {gp_t, gp_e}, Type::function({t}, Type::result(t, e)), "__builtin_ok");
     registerGenericBuiltin("err", {gp_t, gp_e}, Type::function({e}, Type::result(t, e)), "__builtin_err");
     registerGenericBuiltin("block_on", {gp_t}, Type::function({Type::future(t)}, t), "__builtin_block_on");
+    registerGenericBuiltin("task_spawn", {gp_t_copy},
+                           Type::function({Type::reference(executor_type, true), Type::future(t_copy)}, Type::taskHandle(t_copy)),
+                           "__builtin_task_spawn");
+    registerGenericBuiltin("task_join", {gp_t_copy},
+                           Type::function({Type::reference(executor_type, true), Type::taskHandle(t_copy)}, Type::option(t_copy)),
+                           "__builtin_task_join");
+    registerGenericBuiltin("task_cancel", {gp_t},
+                           Type::function({Type::reference(Type::taskHandle(t), true)}, Type::simple(TypeKind::Bool)),
+                           "__builtin_task_cancel");
+    registerGenericBuiltin("task_finished", {gp_t},
+                           Type::function({Type::reference(Type::taskHandle(t))}, Type::simple(TypeKind::Bool)),
+                           "__builtin_task_finished");
 }
 
 void SemanticAnalyzer::registerGenericBuiltin(std::string name, std::vector<ast::GenericParameter> parameters,
@@ -934,6 +954,12 @@ Type SemanticAnalyzer::resolveType(const ast::TypeRef& type_ref) {
             return errorType();
         }
         base = Type::future(resolveType(type_ref.generic_arguments.front()));
+    } else if (base_name == "TaskHandle") {
+        if (type_ref.generic_arguments.size() != 1) {
+            error(type_ref.span, "`TaskHandle` expects exactly one type argument");
+            return errorType();
+        }
+        base = Type::taskHandle(resolveType(type_ref.generic_arguments.front()));
     } else if (const auto kind = simpleTypeKind(base_name)) {
         if (!type_ref.generic_arguments.empty()) {
             error(type_ref.span, "type `" + base_name + "` does not accept generic arguments");
@@ -1004,6 +1030,8 @@ Type SemanticAnalyzer::resolveTraitType(const ast::TypeRef& type_ref, const Type
                                 resolveTraitType(type_ref.generic_arguments[1], self_type, associated_types));
         } else if (name == "Future" && type_ref.generic_arguments.size() == 1) {
             base = Type::future(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types));
+        } else if (name == "TaskHandle" && type_ref.generic_arguments.size() == 1) {
+            base = Type::taskHandle(resolveTraitType(type_ref.generic_arguments[0], self_type, associated_types));
         } else if (const auto kind = simpleTypeKind(name)) {
             if (!type_ref.generic_arguments.empty()) {
                 error(type_ref.span, "type `" + name + "` does not accept generic arguments");
@@ -1037,6 +1065,7 @@ Type SemanticAnalyzer::instantiateType(const Type& type, const std::unordered_ma
     if (type.kind == TypeKind::VecMutIter && type.element) return Type::borrowedVectorIterator(instantiateType(*type.element, substitutions), true);
     if (type.kind == TypeKind::Option && type.element) return Type::option(instantiateType(*type.element, substitutions));
     if (type.kind == TypeKind::Future && type.element) return Type::future(instantiateType(*type.element, substitutions));
+    if (type.kind == TypeKind::TaskHandle && type.element) return Type::taskHandle(instantiateType(*type.element, substitutions));
     if (type.kind == TypeKind::Array && type.element) return Type::array(instantiateType(*type.element, substitutions), type.array_length);
     if (type.kind == TypeKind::Slice && type.element) return Type::slice(instantiateType(*type.element, substitutions));
     if (type.kind == TypeKind::Range && type.element) return Type::range(instantiateType(*type.element, substitutions));
@@ -1082,6 +1111,7 @@ bool SemanticAnalyzer::inferGeneric(const Type& pattern, const Type& actual,
         case TypeKind::VecMutIter:
         case TypeKind::Option:
         case TypeKind::Future:
+        case TypeKind::TaskHandle:
         case TypeKind::Array:
         case TypeKind::Slice:
         case TypeKind::Range:

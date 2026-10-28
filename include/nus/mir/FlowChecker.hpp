@@ -17,6 +17,7 @@ struct Loan {
     LocalId reference{InvalidLocalId};
     bool is_mutable{false};
     bool is_pin{false};
+    bool is_scoped{false};
     SourceSpan span{};
 };
 

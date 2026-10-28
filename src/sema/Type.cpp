@@ -92,6 +92,13 @@ Type Type::future(Type result_type) {
     return type;
 }
 
+Type Type::taskHandle(Type result_type) {
+    Type type;
+    type.kind = TypeKind::TaskHandle;
+    type.element = std::make_shared<Type>(std::move(result_type));
+    return type;
+}
+
 Type Type::typeParameter(std::string name, std::vector<std::string> bounds) {
     Type type;
     type.kind = TypeKind::TypeParameter;
@@ -216,7 +223,8 @@ bool Type::isCopy() const noexcept {
         case TypeKind::Result:
             return generic_arguments.size() == 2 && generic_arguments[0].isCopy() && generic_arguments[1].isCopy();
         case TypeKind::Future:
-            // Futures own a suspended coroutine frame in milestone 18 and are never Copy.
+        case TypeKind::TaskHandle:
+            // Futures and task handles own runtime state and are never Copy.
             return false;
         case TypeKind::TypeParameter:
             return std::find(trait_bounds.begin(), trait_bounds.end(), "Copy") != trait_bounds.end();
@@ -231,6 +239,7 @@ bool Type::isCopy() const noexcept {
         case TypeKind::UdpSocket:
         case TypeKind::Reactor:
         case TypeKind::Executor:
+        case TypeKind::TaskScope:
         case TypeKind::Struct:
         case TypeKind::Enum:
             return false;
@@ -240,7 +249,7 @@ bool Type::isCopy() const noexcept {
 
 bool Type::containsReference() const noexcept {
     if (kind == TypeKind::Reference || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter) return true;
-    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec || kind == TypeKind::VecIter || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter || kind == TypeKind::Option || kind == TypeKind::Future) && element) {
+    if ((kind == TypeKind::Array || kind == TypeKind::Slice || kind == TypeKind::Range || kind == TypeKind::Vec || kind == TypeKind::VecIter || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter || kind == TypeKind::Option || kind == TypeKind::Future || kind == TypeKind::TaskHandle) && element) {
         return element->containsReference();
     }
     if (kind == TypeKind::Result) {
@@ -258,7 +267,7 @@ bool Type::containsReference() const noexcept {
 
 bool Type::carriesBorrow() const noexcept {
     return kind == TypeKind::Reference || kind == TypeKind::VecRefIter || kind == TypeKind::VecMutIter ||
-           kind == TypeKind::Reactor || kind == TypeKind::Future;
+           kind == TypeKind::Reactor || kind == TypeKind::TaskScope || kind == TypeKind::Future;
 }
 
 std::string Type::name() const {
@@ -290,6 +299,9 @@ std::string Type::name() const {
         case TypeKind::UdpSocket: return "UdpSocket";
         case TypeKind::Reactor: return "Reactor";
         case TypeKind::Executor: return "Executor";
+        case TypeKind::TaskScope: return "TaskScope";
+        case TypeKind::TaskHandle:
+            return "TaskHandle<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Future:
             return "Future<" + (element ? element->name() : std::string("<unknown>")) + ">";
         case TypeKind::Vec:
@@ -356,6 +368,7 @@ bool operator==(const Type& lhs, const Type& rhs) {
         case TypeKind::VecMutIter:
         case TypeKind::Option:
         case TypeKind::Future:
+        case TypeKind::TaskHandle:
             if (!lhs.element || !rhs.element) return lhs.element == rhs.element;
             return *lhs.element == *rhs.element;
         case TypeKind::Result:

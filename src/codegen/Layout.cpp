@@ -55,13 +55,19 @@ TypeLayout LayoutEngine::layoutOf(const sema::Type& type) const {
         case TypeKind::TcpListener:
         case TypeKind::UdpSocket: return {pointer, pointer};
         case TypeKind::Reactor:
-        case TypeKind::Executor: return {pointer * 3U, pointer};
+        case TypeKind::TaskScope: return {pointer * 3U, pointer};
+        case TypeKind::Executor: {
+            const std::size_t alignment = std::max(pointer, std::size_t{8});
+            const std::size_t id_offset = alignTo(pointer * 3U, 8);
+            return {alignTo(id_offset + 8U, alignment), alignment};
+        }
         case TypeKind::String:
         case TypeKind::Vec: return {pointer * 3U, pointer};
         case TypeKind::SocketAddr: return {8, 4};
         case TypeKind::VecIter: return {pointer * 4U, pointer};
         case TypeKind::VecRefIter:
         case TypeKind::VecMutIter: return {pointer * 3U, pointer};
+        case TypeKind::TaskHandle: return {pointer, pointer};
         case TypeKind::Future: {
             if (!type.element) throw std::runtime_error("layout: malformed Future");
             // M18 future ABI: ready flag, optional payload, frame, poll callback, destroy callback.

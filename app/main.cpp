@@ -123,6 +123,8 @@ int main(int argc, char** argv) {
             const auto tcp_listener_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::TcpListener));
             const auto reactor_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::Reactor));
             const auto executor_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::Executor));
+            const auto scope_layout = layouts.layoutOf(nus::sema::Type::simple(nus::sema::TypeKind::TaskScope));
+            const auto task_handle_i32_layout = layouts.layoutOf(nus::sema::Type::taskHandle(nus::sema::Type::simple(nus::sema::TypeKind::I32)));
             const auto future_i32_layout = layouts.layoutOf(nus::sema::Type::future(nus::sema::Type::simple(nus::sema::TypeKind::I32)));
             std::cout << "target " << target.description() << '\n';
             std::cout << "string size=" << string_layout.size << " align=" << string_layout.alignment << '\n';
@@ -133,6 +135,8 @@ int main(int argc, char** argv) {
             std::cout << "TcpListener size=" << tcp_listener_layout.size << " align=" << tcp_listener_layout.alignment << '\n';
             std::cout << "Reactor size=" << reactor_layout.size << " align=" << reactor_layout.alignment << '\n';
             std::cout << "Executor size=" << executor_layout.size << " align=" << executor_layout.alignment << '\n';
+            std::cout << "TaskScope size=" << scope_layout.size << " align=" << scope_layout.alignment << '\n';
+            std::cout << "TaskHandle<i32> size=" << task_handle_i32_layout.size << " align=" << task_handle_i32_layout.alignment << '\n';
             std::cout << "Future<i32> size=" << future_i32_layout.size << " align=" << future_i32_layout.alignment << '\n';
             for (const auto& structure : mir.structs) {
                 const auto layout = layouts.layoutOfStruct(structure.name);

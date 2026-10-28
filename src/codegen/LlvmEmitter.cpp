@@ -260,7 +260,7 @@ public:
 
     std::string run() {
         std::ostringstream out;
-        out << "; NUS LLVM IR - milestone 18\n";
+        out << "; NUS LLVM IR - milestone 19\n";
         out << "; target: " << target_.description() << "\n";
         if (!target_.triple.empty()) out << "target triple = \"" << target_.triple << "\"\n";
         out << "\n";
@@ -293,6 +293,7 @@ public:
             out << "declare i32 @ioctlsocket(i64, i32, ptr)\n";
             out << "declare i32 @WSAPoll(ptr, i32, i32)\n";
             out << "declare void @Sleep(i32)\n";
+            out << "declare i64 @GetTickCount64()\n";
         } else {
             out << "declare i32 @socket(i32, i32, i32)\n";
             out << "declare i32 @connect(i32, ptr, i32)\n";
@@ -305,6 +306,7 @@ public:
             out << "declare i64 @recv(i32, ptr, i64, i32)\n";
             out << "declare i32 @close(i32)\n";
             out << "declare i32 @fcntl(i32, i32, ...)\n";
+            out << "declare i32 @clock_gettime(i32, ptr)\n";
             if (darwinTarget()) out << "declare i32 @poll(ptr, i32, i32)\n";
             else out << "declare i32 @poll(ptr, " << usizeType() << ", i32)\n";
             if (darwinTarget()) out << "declare ptr @__error()\n";
@@ -350,6 +352,8 @@ public:
             case TypeKind::UdpSocket: return "%nus.udpsocket";
             case TypeKind::Reactor: return "%nus.reactor";
             case TypeKind::Executor: return "%nus.executor";
+            case TypeKind::TaskScope: return "%nus.scope";
+            case TypeKind::TaskHandle: return "{ ptr }";
             case TypeKind::Future:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Future type");
                 // ready, optional payload, frame, poll(frame,out), destroy(frame)
@@ -367,6 +371,7 @@ public:
                 return "{ ptr, " + usizeType() + ", " + usizeType() + " }";
             case TypeKind::Option:
                 if (!type.element) throw std::runtime_error("LLVM codegen: malformed Option type");
+                if (type.element->isUnit()) return "{ i1 }";
                 return "{ i1, " + llvmType(*type.element) + " }";
             case TypeKind::Result:
                 if (type.generic_arguments.size() != 2) throw std::runtime_error("LLVM codegen: malformed Result type");
@@ -470,10 +475,13 @@ private:
         out << "%nus.udpsocket = type { i64 }\n";
         out << "%nus.reactor.entry = type { i64, i16, i16, " << usizeType() << " }\n";
         out << "%nus.reactor = type { ptr, " << usizeType() << ", " << usizeType() << " }\n";
-        out << "%nus.task = type { ptr, ptr, ptr }\n";
-        out << "%nus.executor = type { ptr, " << usizeType() << ", " << usizeType() << " }\n";
+        out << "%nus.task.shared = type { i32, i1, i1, ptr, i64 }\n";
+        out << "%nus.task = type { ptr, ptr, ptr, ptr }\n";
+        out << "%nus.executor = type { ptr, " << usizeType() << ", " << usizeType() << ", i64 }\n";
+        out << "%nus.scope = type { ptr, " << usizeType() << ", " << usizeType() << " }\n";
         out << "%nus.future.header = type { i32, i64, i16, ptr, i32 }\n";
         out << "%nus.future.yield.frame = type { i32, i64, i16, ptr, i32, i1 }\n";
+        out << "%nus.future.sleep.frame = type { i32, i64, i16, ptr, i32, i64 }\n";
         out << "%nus.future.accept.frame = type { i32, i64, i16, ptr, i32, i64 }\n";
         out << "%nus.future.recv.frame = type { i32, i64, i16, ptr, i32, i64, " << usizeType() << " }\n";
         out << "%nus.future.send.frame = type { i32, i64, i16, ptr, i32, i64, ptr, " << usizeType() << " }\n";
@@ -481,6 +489,7 @@ private:
         else out << "%nus.os.pollfd = type { i32, i16, i16 }\n";
         out << "%nus.hostent = type { ptr, ptr, i32, i32, ptr }\n";
         out << "%nus.timeval = type { i64, i64 }\n";
+        out << "%nus.timespec = type { i64, i64 }\n";
         out << "%nus.sockaddr.in = type { i16, i16, i32, [8 x i8] }\n";
         for (const auto& structure : program_.structs) {
             out << structSymbol(structure.name) << " = type { ";
@@ -520,6 +529,7 @@ private:
         emitGlobalCString(out, ".nus.fmt.u32", "%u");
         emitGlobalCString(out, ".nus.fmt.i64", "%lld");
         emitGlobalCString(out, ".nus.fmt.u64", "%llu");
+        out << "@nus.executor.next_id = internal global i64 1\n";
         emitGlobalCString(out, ".nus.fmt.f64", "%.17g");
         emitGlobalCString(out, ".nus.fmt.char", "%c");
         emitGlobalCString(out, ".nus.fmt.str", "%.*s");
@@ -723,6 +733,44 @@ private:
 
     void emitFutureRuntimeHelpers(std::ostringstream& out) const {
         const std::string usize = usizeType();
+        // Milestone 19 monotonic timer used by sleep futures and executor deadlines.
+        out << "define internal i64 @nus_now_ms() {\n";
+        out << "entry:\n";
+        if (windowsTarget()) {
+            out << "  %now = call i64 @GetTickCount64()\n";
+            out << "  ret i64 %now\n";
+        } else {
+            out << "  %ts = alloca %nus.timespec\n";
+            out << "  %rc = call i32 @clock_gettime(i32 " << (darwinTarget() ? 6 : 1) << ", ptr %ts)\n";
+            out << "  %sec.ptr = getelementptr inbounds %nus.timespec, ptr %ts, i32 0, i32 0\n";
+            out << "  %nsec.ptr = getelementptr inbounds %nus.timespec, ptr %ts, i32 0, i32 1\n";
+            out << "  %sec = load i64, ptr %sec.ptr\n";
+            out << "  %nsec = load i64, ptr %nsec.ptr\n";
+            out << "  %sec.ms = mul i64 %sec, 1000\n";
+            out << "  %nsec.ms = sdiv i64 %nsec, 1000000\n";
+            out << "  %now = add i64 %sec.ms, %nsec.ms\n";
+            out << "  ret i64 %now\n";
+        }
+        out << "}\n\n";
+
+        out << "define internal void @nus_task_shared_release(ptr %shared) {\n";
+        out << "entry:\n";
+        out << "  %null = icmp eq ptr %shared, null\n";
+        out << "  br i1 %null, label %done, label %release\n";
+        out << "release:\n";
+        out << "  %refs.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 0\n";
+        out << "  %refs = load i32, ptr %refs.ptr\n";
+        out << "  %next = sub i32 %refs, 1\n";
+        out << "  store i32 %next, ptr %refs.ptr\n";
+        out << "  %last = icmp eq i32 %next, 0\n";
+        out << "  br i1 %last, label %free.shared, label %done\n";
+        out << "free.shared:\n";
+        out << "  %result.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 3\n";
+        out << "  %result = load ptr, ptr %result.ptr\n";
+        out << "  call void @free(ptr %result)\n";
+        out << "  call void @free(ptr %shared)\n";
+        out << "  br label %done\n";
+        out << "done:\n  ret void\n}\n\n";
         out << "define internal void @nus_future_wait(ptr %frame) {\n";
         out << "entry:\n";
         out << "  %handle.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 1\n";
@@ -763,12 +811,14 @@ private:
         }
         out << "  ret void\n";
         out << "idle:\n";
+        out << "  %has.timeout = icmp sge i32 %timeout, 0\n";
+        out << "  %idle.timeout = select i1 %has.timeout, i32 %timeout, i32 1\n";
         if (windowsTarget()) {
-            out << "  call void @Sleep(i32 1)\n";
+            out << "  call void @Sleep(i32 %idle.timeout)\n";
         } else if (darwinTarget()) {
-            out << "  %irc = call i32 @poll(ptr null, i32 0, i32 1)\n";
+            out << "  %irc = call i32 @poll(ptr null, i32 0, i32 %idle.timeout)\n";
         } else {
-            out << "  %irc = call i32 @poll(ptr null, " << usize << " 0, i32 1)\n";
+            out << "  %irc = call i32 @poll(ptr null, " << usize << " 0, i32 %idle.timeout)\n";
         }
         out << "  ret void\n";
         out << "}\n\n";
@@ -787,6 +837,65 @@ private:
         out << "}\n\n";
         out << "define internal void @nus_yield_drop(ptr %frame) {\nentry:\n  call void @free(ptr %frame)\n  ret void\n}\n\n";
 
+        out << "define internal i1 @nus_sleep_poll(ptr %frame, ptr %out) {\n";
+        out << "entry:\n";
+        out << "  %deadline.ptr = getelementptr inbounds %nus.future.sleep.frame, ptr %frame, i32 0, i32 5\n";
+        out << "  %timeout.ptr = getelementptr inbounds %nus.future.sleep.frame, ptr %frame, i32 0, i32 4\n";
+        out << "  %deadline = load i64, ptr %deadline.ptr\n";
+        out << "  %now = call i64 @nus_now_ms()\n";
+        out << "  %ready = icmp sge i64 %now, %deadline\n";
+        out << "  br i1 %ready, label %done, label %pending\n";
+        out << "pending:\n";
+        out << "  %remaining64 = sub i64 %deadline, %now\n";
+        out << "  %too.large = icmp sgt i64 %remaining64, 2147483647\n";
+        out << "  %remaining32 = trunc i64 %remaining64 to i32\n";
+        out << "  %timeout = select i1 %too.large, i32 2147483647, i32 %remaining32\n";
+        out << "  store i32 %timeout, ptr %timeout.ptr\n";
+        out << "  ret i1 false\n";
+        out << "done:\n";
+        out << "  store i32 0, ptr %timeout.ptr\n";
+        out << "  ret i1 true\n";
+        out << "}\n\n";
+        out << "define internal void @nus_sleep_drop(ptr %frame) {\nentry:\n  call void @free(ptr %frame)\n  ret void\n}\n\n";
+
+        out << "define internal void @nus_executor_enqueue(ptr %executor, ptr %frame, ptr %poll, ptr %drop, ptr %shared) {\n";
+        out << "entry:\n";
+        out << "  %data.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 0\n";
+        out << "  %len.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 1\n";
+        out << "  %cap.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 2\n";
+        out << "  %data = load ptr, ptr %data.ptr\n";
+        out << "  %len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %cap = load " << usize << ", ptr %cap.ptr\n";
+        out << "  %need = add " << usize << " %len, 1\n";
+        out << "  %grow = icmp ugt " << usize << " %need, %cap\n";
+        out << "  br i1 %grow, label %resize, label %write.old\n";
+        out << "resize:\n";
+        out << "  %empty = icmp eq " << usize << " %cap, 0\n";
+        out << "  %double = mul " << usize << " %cap, 2\n";
+        out << "  %newcap = select i1 %empty, " << usize << " 4, " << usize << " %double\n";
+        out << "  %one = getelementptr %nus.task, ptr null, i32 1\n";
+        out << "  %stride = ptrtoint ptr %one to " << usize << "\n";
+        out << "  %bytes = mul " << usize << " %newcap, %stride\n";
+        out << "  %resized = call ptr @realloc(ptr %data, " << usize << " %bytes)\n";
+        out << "  %ok = icmp ne ptr %resized, null\n";
+        out << "  call void @nus_assert(i1 %ok)\n";
+        out << "  store ptr %resized, ptr %data.ptr\n";
+        out << "  store " << usize << " %newcap, ptr %cap.ptr\n";
+        out << "  br label %write.new\n";
+        out << "write.old:\n  br label %write\n";
+        out << "write.new:\n  br label %write\n";
+        out << "write:\n";
+        out << "  %active = phi ptr [ %data, %write.old ], [ %resized, %write.new ]\n";
+        out << "  %slot = getelementptr inbounds %nus.task, ptr %active, " << usize << " %len\n";
+        out << "  %t0 = insertvalue %nus.task zeroinitializer, ptr %frame, 0\n";
+        out << "  %t1 = insertvalue %nus.task %t0, ptr %poll, 1\n";
+        out << "  %t2 = insertvalue %nus.task %t1, ptr %drop, 2\n";
+        out << "  %t3 = insertvalue %nus.task %t2, ptr %shared, 3\n";
+        out << "  store %nus.task %t3, ptr %slot\n";
+        out << "  store " << usize << " %need, ptr %len.ptr\n";
+        out << "  ret void\n";
+        out << "}\n\n";
+
         out << "define internal void @nus_executor_wait(ptr %executor) {\n";
         out << "entry:\n";
         out << "  %data.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 0\n";
@@ -803,9 +912,11 @@ private:
         out << "  %scan.i = alloca " << usize << "\n";
         out << "  %poll.n = alloca " << usize << "\n";
         out << "  %has.idle = alloca i1\n";
+        out << "  %min.timeout = alloca i32\n";
         out << "  store " << usize << " 0, ptr %scan.i\n";
         out << "  store " << usize << " 0, ptr %poll.n\n";
         out << "  store i1 false, ptr %has.idle\n";
+        out << "  store i32 -1, ptr %min.timeout\n";
         out << "  br label %scan.head\n";
         out << "scan.head:\n";
         out << "  %i = load " << usize << ", ptr %scan.i\n";
@@ -817,10 +928,27 @@ private:
         out << "  %frame = load ptr, ptr %frame.ptr\n";
         out << "  %handle.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 1\n";
         out << "  %events.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 2\n";
+        out << "  %timeout.ptr = getelementptr inbounds %nus.future.header, ptr %frame, i32 0, i32 4\n";
         out << "  %handle = load i64, ptr %handle.ptr\n";
         out << "  %events = load i16, ptr %events.ptr\n";
+        out << "  %task.timeout = load i32, ptr %timeout.ptr\n";
+        out << "  %has.timeout = icmp sge i32 %task.timeout, 0\n";
+        out << "  br i1 %has.timeout, label %consider.timeout, label %after.timeout\n";
+        out << "consider.timeout:\n";
+        out << "  %cur.min = load i32, ptr %min.timeout\n";
+        out << "  %no.min = icmp slt i32 %cur.min, 0\n";
+        out << "  %smaller = icmp slt i32 %task.timeout, %cur.min\n";
+        out << "  %take = or i1 %no.min, %smaller\n";
+        out << "  br i1 %take, label %set.timeout, label %after.timeout\n";
+        out << "set.timeout:\n";
+        out << "  store i32 %task.timeout, ptr %min.timeout\n";
+        out << "  br label %after.timeout\n";
+        out << "after.timeout:\n";
         out << "  %has.handle = icmp sge i64 %handle, 0\n";
-        out << "  br i1 %has.handle, label %add.fd, label %mark.idle\n";
+        out << "  br i1 %has.handle, label %add.fd, label %mark.idle.check\n";
+        out << "mark.idle.check:\n";
+        out << "  %untimed = icmp slt i32 %task.timeout, 0\n";
+        out << "  br i1 %untimed, label %mark.idle, label %scan.next\n";
         out << "mark.idle:\n";
         out << "  store i1 true, ptr %has.idle\n";
         out << "  br label %scan.next\n";
@@ -848,10 +976,13 @@ private:
         out << "wait.select:\n";
         out << "  %count = load " << usize << ", ptr %poll.n\n";
         out << "  %idle = load i1, ptr %has.idle\n";
+        out << "  %minimum = load i32, ptr %min.timeout\n";
+        out << "  %has.minimum = icmp sge i32 %minimum, 0\n";
+        out << "  %base.timeout = select i1 %has.minimum, i32 %minimum, i32 -1\n";
+        out << "  %timeout = select i1 %idle, i32 1, i32 %base.timeout\n";
         out << "  %has.fds = icmp ne " << usize << " %count, 0\n";
-        out << "  br i1 %has.fds, label %wait.fds, label %wait.idle\n";
+        out << "  br i1 %has.fds, label %wait.fds, label %wait.no.fds\n";
         out << "wait.fds:\n";
-        out << "  %timeout = select i1 %idle, i32 1, i32 -1\n";
         if (windowsTarget()) {
             out << "  %count32 = trunc " << usize << " %count to i32\n";
             out << "  %prc = call i32 @WSAPoll(ptr %fds, i32 %count32, i32 %timeout)\n";
@@ -862,17 +993,69 @@ private:
             out << "  %prc = call i32 @poll(ptr %fds, " << usize << " %count, i32 %timeout)\n";
         }
         out << "  br label %cleanup\n";
-        out << "wait.idle:\n";
-        if (windowsTarget()) out << "  call void @Sleep(i32 1)\n";
-        else if (darwinTarget()) out << "  %irc = call i32 @poll(ptr null, i32 0, i32 1)\n";
-        else out << "  %irc = call i32 @poll(ptr null, " << usize << " 0, i32 1)\n";
+        out << "wait.no.fds:\n";
+        out << "  %no.fd.timeout = select i1 %has.minimum, i32 %minimum, i32 1\n";
+        if (windowsTarget()) out << "  call void @Sleep(i32 %no.fd.timeout)\n";
+        else if (darwinTarget()) out << "  %irc = call i32 @poll(ptr null, i32 0, i32 %no.fd.timeout)\n";
+        else out << "  %irc = call i32 @poll(ptr null, " << usize << " 0, i32 %no.fd.timeout)\n";
         out << "  br label %cleanup\n";
         out << "cleanup:\n  call void @free(ptr %fds)\n  br label %done\n";
         out << "done:\n  ret void\n}\n\n";
 
-        out << "define internal void @nus_executor_run(ptr %executor) {\n";
+        out << "define internal void @nus_executor_cancel_all(ptr %executor) {\n";
+        out << "entry:\n";
+        out << "  %data.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 0\n";
+        out << "  %len.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 1\n";
+        out << "  %cap.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 2\n";
+        out << "  %data = load ptr, ptr %data.ptr\n";
+        out << "  %len = load " << usize << ", ptr %len.ptr\n";
+        out << "  %i = alloca " << usize << "\n";
+        out << "  store " << usize << " 0, ptr %i\n";
+        out << "  br label %head\n";
+        out << "head:\n";
+        out << "  %idx = load " << usize << ", ptr %i\n";
+        out << "  %more = icmp ult " << usize << " %idx, %len\n";
+        out << "  br i1 %more, label %body, label %done.loop\n";
+        out << "body:\n";
+        out << "  %task = getelementptr inbounds %nus.task, ptr %data, " << usize << " %idx\n";
+        out << "  %fptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 0\n";
+        out << "  %dptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 2\n";
+        out << "  %sptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 3\n";
+        out << "  %frame = load ptr, ptr %fptr\n";
+        out << "  %drop = load ptr, ptr %dptr\n";
+        out << "  %shared = load ptr, ptr %sptr\n";
+        out << "  call void %drop(ptr %frame)\n";
+        out << "  %has.shared = icmp ne ptr %shared, null\n";
+        out << "  br i1 %has.shared, label %mark.cancel, label %next\n";
+        out << "mark.cancel:\n";
+        out << "  %cancel.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 2\n";
+        out << "  %finished.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 1\n";
+        out << "  store i1 true, ptr %cancel.ptr\n";
+        out << "  store i1 true, ptr %finished.ptr\n";
+        out << "  call void @nus_task_shared_release(ptr %shared)\n";
+        out << "  br label %next\n";
+        out << "next:\n";
+        out << "  %next.idx = add " << usize << " %idx, 1\n";
+        out << "  store " << usize << " %next.idx, ptr %i\n";
+        out << "  br label %head\n";
+        out << "done.loop:\n";
+        out << "  call void @free(ptr %data)\n";
+        out << "  store ptr null, ptr %data.ptr\n";
+        out << "  store " << usize << " 0, ptr %len.ptr\n";
+        out << "  store " << usize << " 0, ptr %cap.ptr\n";
+        out << "  ret void\n";
+        out << "}\n\n";
+
+        out << "define internal void @nus_executor_run_until(ptr %executor, ptr %target) {\n";
         out << "entry:\n  br label %outer\n";
         out << "outer:\n";
+        out << "  %has.target = icmp ne ptr %target, null\n";
+        out << "  br i1 %has.target, label %check.target, label %queue.check\n";
+        out << "check.target:\n";
+        out << "  %target.finished.ptr = getelementptr inbounds %nus.task.shared, ptr %target, i32 0, i32 1\n";
+        out << "  %target.finished = load i1, ptr %target.finished.ptr\n";
+        out << "  br i1 %target.finished, label %done, label %queue.check\n";
+        out << "queue.check:\n";
         out << "  %data.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 0\n";
         out << "  %len.ptr = getelementptr inbounds %nus.executor, ptr %executor, i32 0, i32 1\n";
         out << "  %data = load ptr, ptr %data.ptr\n";
@@ -890,11 +1073,41 @@ private:
         out << "  %fptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 0\n";
         out << "  %pptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 1\n";
         out << "  %dptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 2\n";
-        out << "  %frame = load ptr, ptr %fptr\n  %poll = load ptr, ptr %pptr\n  %drop = load ptr, ptr %dptr\n";
-        out << "  %ready = call i1 %poll(ptr %frame, ptr null)\n";
-        out << "  br i1 %ready, label %task.done, label %task.pending\n";
-        out << "task.done:\n";
+        out << "  %sptr = getelementptr inbounds %nus.task, ptr %task, i32 0, i32 3\n";
+        out << "  %frame = load ptr, ptr %fptr\n";
+        out << "  %poll = load ptr, ptr %pptr\n";
+        out << "  %drop = load ptr, ptr %dptr\n";
+        out << "  %shared = load ptr, ptr %sptr\n";
+        out << "  %has.shared = icmp ne ptr %shared, null\n";
+        out << "  br i1 %has.shared, label %check.cancel, label %poll.plain\n";
+        out << "check.cancel:\n";
+        out << "  %cancel.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 2\n";
+        out << "  %cancelled = load i1, ptr %cancel.ptr\n";
+        out << "  br i1 %cancelled, label %task.cancelled, label %poll.shared\n";
+        out << "poll.shared:\n";
+        out << "  %result.ptr.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 3\n";
+        out << "  %result.ptr = load ptr, ptr %result.ptr.ptr\n";
+        out << "  %ready.shared = call i1 %poll(ptr %frame, ptr %result.ptr)\n";
+        out << "  br i1 %ready.shared, label %task.done.shared, label %task.pending\n";
+        out << "poll.plain:\n";
+        out << "  %ready.plain = call i1 %poll(ptr %frame, ptr null)\n";
+        out << "  br i1 %ready.plain, label %task.done.plain, label %task.pending\n";
+        out << "task.cancelled:\n";
         out << "  call void %drop(ptr %frame)\n";
+        out << "  %cancel.finished.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 1\n";
+        out << "  store i1 true, ptr %cancel.finished.ptr\n";
+        out << "  call void @nus_task_shared_release(ptr %shared)\n";
+        out << "  br label %task.remove\n";
+        out << "task.done.shared:\n";
+        out << "  call void %drop(ptr %frame)\n";
+        out << "  %finished.ptr = getelementptr inbounds %nus.task.shared, ptr %shared, i32 0, i32 1\n";
+        out << "  store i1 true, ptr %finished.ptr\n";
+        out << "  call void @nus_task_shared_release(ptr %shared)\n";
+        out << "  br label %task.remove\n";
+        out << "task.done.plain:\n";
+        out << "  call void %drop(ptr %frame)\n";
+        out << "  br label %task.remove\n";
+        out << "task.remove:\n";
         out << "  %old.len = load " << usize << ", ptr %len.ptr\n";
         out << "  %new.len = sub " << usize << " %old.len, 1\n";
         out << "  %is.last = icmp eq " << usize << " %idx, %new.len\n";
@@ -908,6 +1121,13 @@ private:
         out << "task.pending:\n";
         out << "  %next = add " << usize << " %idx, 1\n  store " << usize << " %next, ptr %i\n  br label %scan.head\n";
         out << "idle.first:\n";
+        out << "  %after.has.target = icmp ne ptr %target, null\n";
+        out << "  br i1 %after.has.target, label %after.check.target, label %after.queue\n";
+        out << "after.check.target:\n";
+        out << "  %after.finished.ptr = getelementptr inbounds %nus.task.shared, ptr %target, i32 0, i32 1\n";
+        out << "  %after.finished = load i1, ptr %after.finished.ptr\n";
+        out << "  br i1 %after.finished, label %done, label %after.queue\n";
+        out << "after.queue:\n";
         out << "  %after.len = load " << usize << ", ptr %len.ptr\n";
         out << "  %after.empty = icmp eq " << usize << " %after.len, 0\n";
         out << "  br i1 %after.empty, label %done, label %idle.wait\n";
@@ -915,6 +1135,7 @@ private:
         out << "  call void @nus_executor_wait(ptr %executor)\n";
         out << "  br label %outer\n";
         out << "done:\n  ret void\n}\n\n";
+        out << "define internal void @nus_executor_run(ptr %executor) {\nentry:\n  call void @nus_executor_run_until(ptr %executor, ptr null)\n  ret void\n}\n\n";
     }
 
     void emitAsyncNetworkHelpers(std::ostringstream& out) const {
@@ -1305,44 +1526,17 @@ void FunctionEmitter::emitDestroy(const sema::Type& type, const std::string& poi
             out_ << "  call void @free(ptr " << entries << ")\n";
             break;
         }
-        case TypeKind::Executor: {
-            const std::string loaded = next("dropexecutor");
-            const std::string data = next("executortasks");
-            const std::string length = next("executorlen");
-            const std::string index_slot = next("executoridxslot");
-            const std::string head = nextLabel("drop.executor.head.");
-            const std::string body = nextLabel("drop.executor.body.");
-            const std::string done = nextLabel("drop.executor.done.");
-            out_ << "  " << loaded << " = load %nus.executor, ptr " << pointer << "\n";
-            out_ << "  " << data << " = extractvalue %nus.executor " << loaded << ", 0\n";
-            out_ << "  " << length << " = extractvalue %nus.executor " << loaded << ", 1\n";
-            out_ << "  " << index_slot << " = alloca " << module_.usizeType() << "\n";
-            out_ << "  store " << module_.usizeType() << " 0, ptr " << index_slot << "\n";
-            out_ << "  br label %" << head << "\n";
-            out_ << head << ":\n";
-            const std::string index = next("executoridx");
-            const std::string more = next("executormore");
-            out_ << "  " << index << " = load " << module_.usizeType() << ", ptr " << index_slot << "\n";
-            out_ << "  " << more << " = icmp ult " << module_.usizeType() << ' ' << index << ", " << length << "\n";
-            out_ << "  br i1 " << more << ", label %" << body << ", label %" << done << "\n";
-            out_ << body << ":\n";
-            const std::string task = next("task");
-            const std::string frame_ptr = next("taskframeptr");
-            const std::string drop_ptr = next("taskdropptr");
-            const std::string frame = next("taskframe");
-            const std::string drop = next("taskdrop");
-            out_ << "  " << task << " = getelementptr inbounds %nus.task, ptr " << data << ", " << module_.usizeType() << ' ' << index << "\n";
-            out_ << "  " << frame_ptr << " = getelementptr inbounds %nus.task, ptr " << task << ", i32 0, i32 0\n";
-            out_ << "  " << drop_ptr << " = getelementptr inbounds %nus.task, ptr " << task << ", i32 0, i32 2\n";
-            out_ << "  " << frame << " = load ptr, ptr " << frame_ptr << "\n";
-            out_ << "  " << drop << " = load ptr, ptr " << drop_ptr << "\n";
-            out_ << "  call void " << drop << "(ptr " << frame << ")\n";
-            const std::string inc = next("executoridx");
-            out_ << "  " << inc << " = add " << module_.usizeType() << ' ' << index << ", 1\n";
-            out_ << "  store " << module_.usizeType() << ' ' << inc << ", ptr " << index_slot << "\n";
-            out_ << "  br label %" << head << "\n";
-            out_ << done << ":\n";
-            out_ << "  call void @free(ptr " << data << ")\n";
+        case TypeKind::Executor:
+        case TypeKind::TaskScope: {
+            out_ << "  call void @nus_executor_cancel_all(ptr " << pointer << ")\n";
+            break;
+        }
+        case TypeKind::TaskHandle: {
+            const std::string loaded = next("droptaskhandle");
+            const std::string shared = next("taskshared");
+            out_ << "  " << loaded << " = load { ptr }, ptr " << pointer << "\n";
+            out_ << "  " << shared << " = extractvalue { ptr } " << loaded << ", 0\n";
+            out_ << "  call void @nus_task_shared_release(ptr " << shared << ")\n";
             break;
         }
         case TypeKind::Future: {
@@ -3304,13 +3498,76 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 store(*inst.destination, {future_ir, f3});
                 return;
             }
-            if (callee.text == "executor_new") {
-                if (!inst.destination || !arguments.empty()) throw std::runtime_error("LLVM codegen: executor_new expects no arguments");
-                store(*inst.destination, {"%nus.executor", "zeroinitializer"});
+            if (callee.text == "sleep_ms") {
+                if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: sleep_ms expects milliseconds");
+                const Value ms = value(arguments[0]);
+                const auto& future_type = local(*inst.destination).type;
+                const std::string future_ir = module_.llvmType(future_type);
+                const std::string one = next("sleepframeone");
+                const std::string bytes = next("sleepframebytes");
+                const std::string frame = next("sleepframe");
+                out_ << "  " << one << " = getelementptr %nus.future.sleep.frame, ptr null, i32 1\n";
+                out_ << "  " << bytes << " = ptrtoint ptr " << one << " to " << module_.usizeType() << "\n";
+                out_ << "  " << frame << " = call ptr @malloc(" << module_.usizeType() << ' ' << bytes << ")\n";
+                const std::string ok = next("sleepalloc");
+                out_ << "  " << ok << " = icmp ne ptr " << frame << ", null\n";
+                out_ << "  call void @nus_assert(i1 " << ok << ")\n";
+                const std::string state = next("sleepstate");
+                const std::string handle = next("sleephandle");
+                const std::string events = next("sleepevents");
+                const std::string reactor = next("sleepreactor");
+                const std::string timeout = next("sleeptimeout");
+                const std::string deadline_ptr = next("sleepdeadlineptr");
+                out_ << "  " << state << " = getelementptr inbounds %nus.future.sleep.frame, ptr " << frame << ", i32 0, i32 0\n";
+                out_ << "  " << handle << " = getelementptr inbounds %nus.future.sleep.frame, ptr " << frame << ", i32 0, i32 1\n";
+                out_ << "  " << events << " = getelementptr inbounds %nus.future.sleep.frame, ptr " << frame << ", i32 0, i32 2\n";
+                out_ << "  " << reactor << " = getelementptr inbounds %nus.future.sleep.frame, ptr " << frame << ", i32 0, i32 3\n";
+                out_ << "  " << timeout << " = getelementptr inbounds %nus.future.sleep.frame, ptr " << frame << ", i32 0, i32 4\n";
+                out_ << "  " << deadline_ptr << " = getelementptr inbounds %nus.future.sleep.frame, ptr " << frame << ", i32 0, i32 5\n";
+                const std::string ms64 = next("sleepms64");
+                const std::string now = next("sleepnow");
+                const std::string deadline = next("sleepdeadline");
+                out_ << "  " << ms64 << " = zext i32 " << ms.repr << " to i64\n";
+                out_ << "  " << now << " = call i64 @nus_now_ms()\n";
+                out_ << "  " << deadline << " = add i64 " << now << ", " << ms64 << "\n";
+                out_ << "  store i32 0, ptr " << state << "\n";
+                out_ << "  store i64 -1, ptr " << handle << "\n";
+                out_ << "  store i16 0, ptr " << events << "\n";
+                out_ << "  store ptr null, ptr " << reactor << "\n";
+                out_ << "  store i32 " << ms.repr << ", ptr " << timeout << "\n";
+                out_ << "  store i64 " << deadline << ", ptr " << deadline_ptr << "\n";
+                const std::string f0 = next("sleepfuture");
+                const std::string f1 = next("sleepfuture");
+                const std::string f2 = next("sleepfuture");
+                const std::string f3 = next("sleepfuture");
+                out_ << "  " << f0 << " = insertvalue " << future_ir << " zeroinitializer, i1 false, 0\n";
+                out_ << "  " << f1 << " = insertvalue " << future_ir << ' ' << f0 << ", ptr " << frame << ", 1\n";
+                out_ << "  " << f2 << " = insertvalue " << future_ir << ' ' << f1 << ", ptr @nus_sleep_poll, 2\n";
+                out_ << "  " << f3 << " = insertvalue " << future_ir << ' ' << f2 << ", ptr @nus_sleep_drop, 3\n";
+                store(*inst.destination, {future_ir, f3});
                 return;
             }
-            if (callee.text == "executor_spawn") {
-                if (arguments.size() != 2) throw std::runtime_error("LLVM codegen: executor_spawn expects &mut Executor and Future<unit>");
+            if (callee.text == "scope_new") {
+                if (!inst.destination || !arguments.empty()) throw std::runtime_error("LLVM codegen: scope_new expects no arguments");
+                store(*inst.destination, {"%nus.scope", "zeroinitializer"});
+                return;
+            }
+            if (callee.text == "executor_new") {
+                if (!inst.destination || !arguments.empty()) throw std::runtime_error("LLVM codegen: executor_new expects no arguments");
+                const std::string id = next("executorid");
+                const std::string next_id = next("executornextid");
+                const std::string initialized = next("executor");
+                out_ << "  " << id << " = load i64, ptr @nus.executor.next_id\n";
+                out_ << "  " << next_id << " = add i64 " << id << ", 1\n";
+                out_ << "  store i64 " << next_id << ", ptr @nus.executor.next_id\n";
+                out_ << "  " << initialized << " = insertvalue %nus.executor zeroinitializer, i64 " << id << ", 3\n";
+                store(*inst.destination, {"%nus.executor", initialized});
+                return;
+            }
+            if (callee.text == "executor_spawn" || callee.text == "scope_spawn") {
+                if (arguments.size() != 2) throw std::runtime_error("LLVM codegen: spawn expects a task container and Future<unit>");
+                const bool scoped = callee.text == "scope_spawn";
+                const std::string container_ir = scoped ? "%nus.scope" : "%nus.executor";
                 const Value executor = value(arguments[0]);
                 const Value future = value(arguments[1]);
                 const std::string ready = next("spawnready");
@@ -3329,9 +3586,9 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 const std::string data_ptr = next("execdataptr");
                 const std::string len_ptr = next("execlenptr");
                 const std::string cap_ptr = next("execcapptr");
-                out_ << "  " << data_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 0\n";
-                out_ << "  " << len_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 1\n";
-                out_ << "  " << cap_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 2\n";
+                out_ << "  " << data_ptr << " = getelementptr inbounds " << container_ir << ", ptr " << executor.repr << ", i32 0, i32 0\n";
+                out_ << "  " << len_ptr << " = getelementptr inbounds " << container_ir << ", ptr " << executor.repr << ", i32 0, i32 1\n";
+                out_ << "  " << cap_ptr << " = getelementptr inbounds " << container_ir << ", ptr " << executor.repr << ", i32 0, i32 2\n";
                 const std::string data = next("execdata");
                 const std::string len = next("execlen");
                 const std::string cap = next("execcap");
@@ -3389,6 +3646,202 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                 if (arguments.size() != 1) throw std::runtime_error("LLVM codegen: executor_run expects &mut Executor");
                 const Value executor = value(arguments[0]);
                 out_ << "  call void @nus_executor_run(ptr " << executor.repr << ")\n";
+                return;
+            }
+            if (callee.text == "scope_run") {
+                if (arguments.size() != 1) throw std::runtime_error("LLVM codegen: scope_run expects &mut TaskScope");
+                const Value scope = value(arguments[0]);
+                out_ << "  call void @nus_executor_run(ptr " << scope.repr << ")\n";
+                return;
+            }
+            if (callee.text == "scope_cancel_all") {
+                if (arguments.size() != 1) throw std::runtime_error("LLVM codegen: scope_cancel_all expects &mut TaskScope");
+                const Value scope = value(arguments[0]);
+                out_ << "  call void @nus_executor_cancel_all(ptr " << scope.repr << ")\n";
+                return;
+            }
+            if (callee.text.rfind("__builtin_task_spawn$", 0) == 0) {
+                if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: task_spawn expects &mut Executor and Future<T>");
+                const auto& handle_type = local(*inst.destination).type;
+                if (handle_type.kind != sema::TypeKind::TaskHandle || !handle_type.element) throw std::runtime_error("LLVM codegen: task_spawn destination must be TaskHandle<T>");
+                const sema::Type result_type = *handle_type.element;
+                const Value executor = value(arguments[0]);
+                const Value future = value(arguments[1]);
+                if (arguments[1].type.kind != sema::TypeKind::Future || !arguments[1].type.element) throw std::runtime_error("LLVM codegen: task_spawn second argument must be Future<T>");
+
+                const std::string shared_one = next("tasksharedone");
+                const std::string shared_bytes = next("tasksharedbytes");
+                const std::string shared = next("taskshared");
+                out_ << "  " << shared_one << " = getelementptr %nus.task.shared, ptr null, i32 1\n";
+                out_ << "  " << shared_bytes << " = ptrtoint ptr " << shared_one << " to " << module_.usizeType() << "\n";
+                out_ << "  " << shared << " = call ptr @malloc(" << module_.usizeType() << ' ' << shared_bytes << ")\n";
+                const std::string shared_ok = next("tasksharedok");
+                out_ << "  " << shared_ok << " = icmp ne ptr " << shared << ", null\n";
+                out_ << "  call void @nus_assert(i1 " << shared_ok << ")\n";
+
+                std::string result_ptr = "null";
+                if (!result_type.isUnit()) {
+                    const std::string result_one = next("taskresultone");
+                    const std::string result_bytes = next("taskresultbytes");
+                    const std::string allocated = next("taskresult");
+                    const std::string result_ir = module_.llvmType(result_type);
+                    out_ << "  " << result_one << " = getelementptr " << result_ir << ", ptr null, i32 1\n";
+                    out_ << "  " << result_bytes << " = ptrtoint ptr " << result_one << " to " << module_.usizeType() << "\n";
+                    out_ << "  " << allocated << " = call ptr @malloc(" << module_.usizeType() << ' ' << result_bytes << ")\n";
+                    const std::string result_ok = next("taskresultok");
+                    out_ << "  " << result_ok << " = icmp ne ptr " << allocated << ", null\n";
+                    out_ << "  call void @nus_assert(i1 " << result_ok << ")\n";
+                    result_ptr = allocated;
+                }
+
+                const std::string refs_ptr = next("taskrefsptr");
+                const std::string finished_ptr = next("taskfinishedptr");
+                const std::string cancelled_ptr = next("taskcancelptr");
+                const std::string result_slot = next("taskresultptrptr");
+                const std::string owner_slot = next("taskownerslot");
+                const std::string executor_id_ptr = next("executoridptr");
+                const std::string executor_id = next("executorid");
+                out_ << "  " << refs_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 0\n";
+                out_ << "  " << finished_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 1\n";
+                out_ << "  " << cancelled_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 2\n";
+                out_ << "  " << result_slot << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 3\n";
+                out_ << "  " << owner_slot << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 4\n";
+                out_ << "  " << executor_id_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 3\n";
+                out_ << "  " << executor_id << " = load i64, ptr " << executor_id_ptr << "\n";
+                out_ << "  store i1 false, ptr " << cancelled_ptr << "\n";
+                out_ << "  store ptr " << result_ptr << ", ptr " << result_slot << "\n";
+                out_ << "  store i64 " << executor_id << ", ptr " << owner_slot << "\n";
+
+                const std::string ready = next("taskspawnready");
+                const std::string ready_label = nextLabel("task.spawn.ready.");
+                const std::string pending_label = nextLabel("task.spawn.pending.");
+                const std::string done_label = nextLabel("task.spawn.done.");
+                out_ << "  " << ready << " = extractvalue " << future.type << ' ' << future.repr << ", 0\n";
+                markMoved(arguments[1]);
+                out_ << "  br i1 " << ready << ", label %" << ready_label << ", label %" << pending_label << "\n";
+                out_ << ready_label << ":\n";
+                out_ << "  store i32 1, ptr " << refs_ptr << "\n";
+                out_ << "  store i1 true, ptr " << finished_ptr << "\n";
+                if (!result_type.isUnit()) {
+                    const std::string payload = next("taskreadypayload");
+                    out_ << "  " << payload << " = extractvalue " << future.type << ' ' << future.repr << ", 1\n";
+                    out_ << "  store " << module_.llvmType(result_type) << ' ' << payload << ", ptr " << result_ptr << "\n";
+                }
+                out_ << "  br label %" << done_label << "\n";
+                out_ << pending_label << ":\n";
+                out_ << "  store i32 2, ptr " << refs_ptr << "\n";
+                out_ << "  store i1 false, ptr " << finished_ptr << "\n";
+                const std::size_t frame_field = result_type.isUnit() ? 1U : 2U;
+                const std::string frame = next("taskspawnframe");
+                const std::string poll = next("taskspawnpoll");
+                const std::string drop = next("taskspawndrop");
+                out_ << "  " << frame << " = extractvalue " << future.type << ' ' << future.repr << ", " << frame_field << "\n";
+                out_ << "  " << poll << " = extractvalue " << future.type << ' ' << future.repr << ", " << (frame_field + 1U) << "\n";
+                out_ << "  " << drop << " = extractvalue " << future.type << ' ' << future.repr << ", " << (frame_field + 2U) << "\n";
+                out_ << "  call void @nus_executor_enqueue(ptr " << executor.repr << ", ptr " << frame << ", ptr " << poll << ", ptr " << drop << ", ptr " << shared << ")\n";
+                out_ << "  br label %" << done_label << "\n";
+                out_ << done_label << ":\n";
+                const std::string handle = next("taskhandle");
+                out_ << "  " << handle << " = insertvalue { ptr } zeroinitializer, ptr " << shared << ", 0\n";
+                store(*inst.destination, {"{ ptr }", handle});
+                return;
+            }
+            if (callee.text.rfind("__builtin_task_finished$", 0) == 0) {
+                if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: task_finished expects &TaskHandle<T>");
+                const Value handle_ref = value(arguments[0]);
+                const std::string handle = next("taskhandleload");
+                const std::string shared = next("taskshared");
+                const std::string finished_ptr = next("taskfinishedptr");
+                const std::string finished = next("taskfinished");
+                out_ << "  " << handle << " = load { ptr }, ptr " << handle_ref.repr << "\n";
+                out_ << "  " << shared << " = extractvalue { ptr } " << handle << ", 0\n";
+                out_ << "  " << finished_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 1\n";
+                out_ << "  " << finished << " = load i1, ptr " << finished_ptr << "\n";
+                store(*inst.destination, {"i1", finished});
+                return;
+            }
+            if (callee.text.rfind("__builtin_task_cancel$", 0) == 0) {
+                if (!inst.destination || arguments.size() != 1) throw std::runtime_error("LLVM codegen: task_cancel expects &mut TaskHandle<T>");
+                const Value handle_ref = value(arguments[0]);
+                const std::string handle = next("taskhandleload");
+                const std::string shared = next("taskshared");
+                const std::string finished_ptr = next("taskfinishedptr");
+                const std::string cancel_ptr = next("taskcancelptr");
+                const std::string finished = next("taskfinished");
+                const std::string already = next("taskalreadycancelled");
+                const std::string can = next("taskcancan");
+                out_ << "  " << handle << " = load { ptr }, ptr " << handle_ref.repr << "\n";
+                out_ << "  " << shared << " = extractvalue { ptr } " << handle << ", 0\n";
+                out_ << "  " << finished_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 1\n";
+                out_ << "  " << cancel_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 2\n";
+                out_ << "  " << finished << " = load i1, ptr " << finished_ptr << "\n";
+                out_ << "  " << already << " = load i1, ptr " << cancel_ptr << "\n";
+                out_ << "  " << can << " = or i1 " << finished << ", " << already << "\n";
+                const std::string requested = next("taskcancelrequested");
+                out_ << "  " << requested << " = xor i1 " << can << ", true\n";
+                const std::string set_label = nextLabel("task.cancel.set.");
+                const std::string done_label = nextLabel("task.cancel.done.");
+                out_ << "  br i1 " << requested << ", label %" << set_label << ", label %" << done_label << "\n";
+                out_ << set_label << ":\n  store i1 true, ptr " << cancel_ptr << "\n  br label %" << done_label << "\n";
+                out_ << done_label << ":\n";
+                store(*inst.destination, {"i1", requested});
+                return;
+            }
+            if (callee.text.rfind("__builtin_task_join$", 0) == 0) {
+                if (!inst.destination || arguments.size() != 2) throw std::runtime_error("LLVM codegen: task_join expects &mut Executor and TaskHandle<T>");
+                const auto& option_type = local(*inst.destination).type;
+                if (option_type.kind != sema::TypeKind::Option || !option_type.element) throw std::runtime_error("LLVM codegen: task_join destination must be Option<T>");
+                const sema::Type result_type = *option_type.element;
+                const Value executor = value(arguments[0]);
+                const Value handle_value = value(arguments[1]);
+                const std::string shared = next("taskjoinshared");
+                out_ << "  " << shared << " = extractvalue { ptr } " << handle_value.repr << ", 0\n";
+                const std::string owner_ptr = next("taskjoinownerptr");
+                const std::string owner_id = next("taskjoinowner");
+                const std::string executor_id_ptr = next("taskjoinexecutoridptr");
+                const std::string executor_id = next("taskjoinexecutorid");
+                const std::string same_executor = next("taskjoinsameexecutor");
+                out_ << "  " << owner_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 4\n";
+                out_ << "  " << owner_id << " = load i64, ptr " << owner_ptr << "\n";
+                out_ << "  " << executor_id_ptr << " = getelementptr inbounds %nus.executor, ptr " << executor.repr << ", i32 0, i32 3\n";
+                out_ << "  " << executor_id << " = load i64, ptr " << executor_id_ptr << "\n";
+                out_ << "  " << same_executor << " = icmp eq i64 " << owner_id << ", " << executor_id << "\n";
+                out_ << "  call void @nus_assert(i1 " << same_executor << ")\n";
+                markMoved(arguments[1]);
+                out_ << "  call void @nus_executor_run_until(ptr " << executor.repr << ", ptr " << shared << ")\n";
+                const std::string cancel_ptr = next("taskjoincancelptr");
+                const std::string cancelled = next("taskjoincancelled");
+                out_ << "  " << cancel_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 2\n";
+                out_ << "  " << cancelled << " = load i1, ptr " << cancel_ptr << "\n";
+                const std::string tag = next("taskjointag");
+                out_ << "  " << tag << " = xor i1 " << cancelled << ", true\n";
+                const std::string option_ir = module_.llvmType(option_type);
+                const std::string o0 = next("taskjoinoption");
+                out_ << "  " << o0 << " = insertvalue " << option_ir << " zeroinitializer, i1 " << tag << ", 0\n";
+                std::string aggregate = o0;
+                if (!result_type.isUnit()) {
+                    const std::string result_ptr_ptr = next("taskjoinresultptrptr");
+                    const std::string result_ptr = next("taskjoinresultptr");
+                    const std::string result = next("taskjoinresult");
+                    const std::string some_label = nextLabel("task.join.some.");
+                    const std::string none_label = nextLabel("task.join.none.");
+                    const std::string merge_label = nextLabel("task.join.merge.");
+                    out_ << "  br i1 " << tag << ", label %" << some_label << ", label %" << none_label << "\n";
+                    out_ << some_label << ":\n";
+                    out_ << "  " << result_ptr_ptr << " = getelementptr inbounds %nus.task.shared, ptr " << shared << ", i32 0, i32 3\n";
+                    out_ << "  " << result_ptr << " = load ptr, ptr " << result_ptr_ptr << "\n";
+                    out_ << "  " << result << " = load " << module_.llvmType(result_type) << ", ptr " << result_ptr << "\n";
+                    const std::string with_payload = next("taskjoinpayload");
+                    out_ << "  " << with_payload << " = insertvalue " << option_ir << ' ' << o0 << ", " << module_.llvmType(result_type) << ' ' << result << ", 1\n";
+                    out_ << "  br label %" << merge_label << "\n";
+                    out_ << none_label << ":\n  br label %" << merge_label << "\n";
+                    out_ << merge_label << ":\n";
+                    const std::string merged = next("taskjoinmerged");
+                    out_ << "  " << merged << " = phi " << option_ir << " [ " << with_payload << ", %" << some_label << " ], [ " << o0 << ", %" << none_label << " ]\n";
+                    aggregate = merged;
+                }
+                out_ << "  call void @nus_task_shared_release(ptr " << shared << ")\n";
+                store(*inst.destination, {option_ir, aggregate});
                 return;
             }
             if (callee.text == "vec_new_i32" || callee.text.rfind("__builtin_vec_new$", 0) == 0) { builtinVecNew(inst); return; }
@@ -3476,11 +3929,13 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
                         expected = err ? destination.type.generic_arguments[1] : destination.type.generic_arguments[0];
                         field = err ? 2 : 1;
                     }
-                    const Value payload = coerce(value(arguments.front()), arguments.front().type, expected);
-                    const std::string inserted = next("payload");
-                    out_ << "  " << inserted << " = insertvalue " << aggregate_type << ' ' << aggregate << ", "
-                         << payload.type << ' ' << payload.repr << ", " << field << "\n";
-                    aggregate = inserted;
+                    if (!expected.isUnit()) {
+                        const Value payload = coerce(value(arguments.front()), arguments.front().type, expected);
+                        const std::string inserted = next("payload");
+                        out_ << "  " << inserted << " = insertvalue " << aggregate_type << ' ' << aggregate << ", "
+                             << payload.type << ' ' << payload.repr << ", " << field << "\n";
+                        aggregate = inserted;
+                    }
                     if (!arguments.front().type.isCopy() && !arguments.front().type.isReference()) markMoved(arguments.front());
                 }
                 store(*inst.destination, {aggregate_type, aggregate});
@@ -3533,7 +3988,7 @@ void FunctionEmitter::instruction(const mir::Instruction& inst) {
             std::vector<sema::Type> payload_types;
             if (destination.type.kind == sema::TypeKind::Option && destination.type.element) {
                 tag = variant == "Some" ? 1U : 0U;
-                if (variant == "Some") { fields = {1}; payload_types = {*destination.type.element}; }
+                if (variant == "Some" && !destination.type.element->isUnit()) { fields = {1}; payload_types = {*destination.type.element}; }
             } else if (destination.type.kind == sema::TypeKind::Result && destination.type.generic_arguments.size() == 2) {
                 tag = variant == "Err" ? 1U : 0U;
                 if (variant == "Err") { fields = {2}; payload_types = {destination.type.generic_arguments[1]}; }

@@ -160,7 +160,7 @@ std::vector<const Loan*> activeLoans(const FunctionFlowInfo& info,
                                      const std::set<std::size_t>& activated_pins) {
     std::vector<const Loan*> result;
     for (const auto& loan : info.loans) {
-        if (loan.is_pin && !activated_pins.contains(loan.id)) continue;
+        if ((loan.is_pin || loan.is_scoped) && !activated_pins.contains(loan.id)) continue;
         const auto found = carriers.find(loan.id);
         if (found == carriers.end()) continue;
         bool active = false;
@@ -199,7 +199,14 @@ bool isReactorRegistration(const Instruction& instruction) {
 bool isExecutorSpawn(const Instruction& instruction) {
     if (instruction.kind != InstructionKind::Call || instruction.operands.empty()) return false;
     const auto& callee = instruction.operands.front();
-    return callee.kind == OperandKind::Global && callee.text == "executor_spawn";
+    if (callee.kind != OperandKind::Global) return false;
+    return callee.text == "executor_spawn" || callee.text.rfind("__builtin_task_spawn$", 0) == 0;
+}
+
+bool isScopeSpawn(const Instruction& instruction) {
+    if (instruction.kind != InstructionKind::Call || instruction.operands.empty()) return false;
+    const auto& callee = instruction.operands.front();
+    return callee.kind == OperandKind::Global && callee.text == "scope_spawn";
 }
 
 void addDiagnostic(std::vector<Diagnostic>& diagnostics, SourceSpan span, std::string message) {
@@ -255,6 +262,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                 .reference = *instruction.destination,
                 .is_mutable = instruction.name == "mut",
                 .is_pin = false,
+                .is_scoped = false,
                 .span = instruction.span,
             };
             local_loans[*instruction.destination].insert(loan.id);
@@ -302,6 +310,55 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
         }
     };
 
+    propagateLoans();
+
+    // Structured scopes are allowed to own Futures that borrow stack locals. Each
+    // scope_spawn creates synthetic scoped loans that become active only after the
+    // spawn call, avoiding a false conflict with the borrow that constructs the Future.
+    struct ScopeSite {
+        BlockId block{InvalidBlockId};
+        std::size_t instruction{0};
+        std::size_t loan{0};
+    };
+    std::vector<ScopeSite> scope_sites;
+    for (const auto& block : function.blocks) {
+        for (std::size_t instruction_index = 0; instruction_index < block.instructions.size(); ++instruction_index) {
+            const auto& instruction = block.instructions[instruction_index];
+            if (!isScopeSpawn(instruction) || instruction.operands.size() < 3) continue;
+            const auto& scope_ref = instruction.operands[1];
+            const auto& future = instruction.operands[2];
+            if (scope_ref.kind != OperandKind::Local || future.kind != OperandKind::Local) continue;
+            const auto future_loans = local_loans.find(future.local);
+            const auto scope_ref_loans = local_loans.find(scope_ref.local);
+            if (future_loans == local_loans.end() || scope_ref_loans == local_loans.end()) continue;
+
+            std::set<LocalId> scope_roots;
+            for (const auto loan_id : scope_ref_loans->second) {
+                if (loan_id < info.loans.size()) scope_roots.insert(info.loans[loan_id].root);
+            }
+            for (const auto scope_root : scope_roots) {
+                const Local* scope_local = findLocal(function, scope_root);
+                if (!scope_local || scope_local->type.kind != sema::TypeKind::TaskScope) continue;
+                for (const auto source_loan_id : future_loans->second) {
+                    if (source_loan_id >= info.loans.size()) continue;
+                    const auto source_loan = info.loans[source_loan_id];
+                    if (source_loan.is_pin || source_loan.is_scoped) continue;
+                    Loan scoped{
+                        .id = next_loan++,
+                        .root = source_loan.root,
+                        .reference = scope_root,
+                        .is_mutable = source_loan.is_mutable,
+                        .is_pin = false,
+                        .is_scoped = true,
+                        .span = instruction.span,
+                    };
+                    info.loans.push_back(scoped);
+                    local_loans[scope_root].insert(scoped.id);
+                    scope_sites.push_back(ScopeSite{.block = block.id, .instruction = instruction_index, .loan = scoped.id});
+                }
+            }
+        }
+    }
     propagateLoans();
 
     // A Reactor stores operating-system handles, but it must not impose a Rust-style
@@ -356,6 +413,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                         .reference = reactor_root,
                         .is_mutable = false,
                         .is_pin = true,
+                        .is_scoped = false,
                         .span = instruction.span,
                     };
                     info.loans.push_back(pin);
@@ -389,6 +447,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
         pins_out[block.id] = {};
     }
     for (const auto& site : pin_sites) pins_created_at[site.block][site.instruction].insert(site.loan);
+    for (const auto& site : scope_sites) pins_created_at[site.block][site.instruction].insert(site.loan);
 
     const auto pin_preds = predecessors(function);
     bool pins_changed = true;
@@ -496,7 +555,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
             if (instruction.kind == InstructionKind::Assign && instruction.destination &&
                 hasProtectionForRoot(active, *instruction.destination)) {
                 if (const Local* local = findLocal(function, *instruction.destination)) {
-                    addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed or reactor-pinned");
+                    addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed, scoped, or reactor-pinned");
                 }
             }
             if ((instruction.kind == InstructionKind::StoreMember || instruction.kind == InstructionKind::StoreIndex || instruction.kind == InstructionKind::StoreDeref) &&
@@ -504,7 +563,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                 const auto root = instruction.operands.front().local;
                 if (hasProtectionForRoot(active, root)) {
                     if (const Local* local = findLocal(function, root)) {
-                        addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed or reactor-pinned");
+                        addDiagnostic(diagnostics, instruction.span, "cannot assign to `" + local->name + "` while it is borrowed, scoped, or reactor-pinned");
                     }
                 }
             }
@@ -524,7 +583,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
             for (const auto moved : consumedByInstruction(instruction)) {
                 if (hasProtectionForRoot(active, moved)) {
                     if (const Local* local = findLocal(function, moved)) {
-                        addDiagnostic(diagnostics, instruction.span, "cannot move `" + local->name + "` while it is borrowed or reactor-pinned");
+                        addDiagnostic(diagnostics, instruction.span, "cannot move `" + local->name + "` while it is borrowed, scoped, or reactor-pinned");
                     }
                 }
             }
@@ -538,7 +597,7 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                     const auto found = local_loans.find(future.local);
                     if (found != local_loans.end() && !found->second.empty()) {
                         addDiagnostic(diagnostics, instruction.span,
-                                      "executor_spawn requires a non-borrowing Future<unit> in milestone 18");
+                                      "detached task spawn requires a non-borrowing Future in milestone 19; use TaskScope for borrowed tasks");
                     }
                 }
             }
@@ -572,14 +631,14 @@ FunctionFlowInfo FlowChecker::analyzeFunction(const Function& function,
                     const auto found = local_loans.find(block.terminator->value.local);
                     if (found != local_loans.end() && !found->second.empty()) {
                         addDiagnostic(diagnostics, block.terminator->span,
-                                      "cannot return a Future that borrows a local resource in milestone 18");
+                                      "cannot return a Future that borrows a local resource in milestone 19");
                     }
                 }
                 for (const auto moved : consumedByTerminator(*block.terminator)) {
                     if (hasProtectionForRoot(active, moved)) {
                         if (const Local* local = findLocal(function, moved)) {
                             addDiagnostic(diagnostics, block.terminator->span,
-                                          "cannot move `" + local->name + "` while it is borrowed or reactor-pinned");
+                                          "cannot move `" + local->name + "` while it is borrowed, scoped, or reactor-pinned");
                         }
                     }
                 }
