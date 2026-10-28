@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(nus_lang VERSION 0.18.0 LANGUAGES CXX)
+project(nus_lang VERSION 0.19.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -184,3 +184,19 @@ add_test(NAME async_network COMMAND nus_async_network_tests)
 add_executable(nus_async_network_native_tests tests/AsyncNetworkNativeTests.cpp)
 target_link_libraries(nus_async_network_native_tests PRIVATE nus_frontend)
 add_test(NAME async_network_native COMMAND nus_async_network_native_tests)
+
+add_executable(nus_structured_concurrency_tests tests/StructuredConcurrencyTests.cpp)
+target_link_libraries(nus_structured_concurrency_tests PRIVATE nus_frontend)
+add_test(NAME structured_concurrency COMMAND nus_structured_concurrency_tests)
+
+add_executable(nus_structured_concurrency_native_tests tests/StructuredConcurrencyNativeTests.cpp)
+target_link_libraries(nus_structured_concurrency_native_tests PRIVATE nus_frontend)
+add_test(NAME structured_concurrency_native COMMAND nus_structured_concurrency_native_tests)
+
+add_executable(nus_timer_tests tests/TimerTests.cpp)
+target_link_libraries(nus_timer_tests PRIVATE nus_frontend)
+add_test(NAME timers COMMAND nus_timer_tests)
+
+add_executable(nus_timer_native_tests tests/TimerNativeTests.cpp)
+target_link_libraries(nus_timer_native_tests PRIVATE nus_frontend)
+add_test(NAME timers_native COMMAND nus_timer_native_tests)

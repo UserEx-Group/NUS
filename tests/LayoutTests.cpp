@@ -59,7 +59,13 @@ int main() {
     const auto reactor_layout = layouts.layoutOf(Type::simple(TypeKind::Reactor));
     if (reactor_layout.size != 24 || reactor_layout.alignment != 8) fail("Reactor ABI mismatch");
     const auto executor_layout = layouts.layoutOf(Type::simple(TypeKind::Executor));
-    if (executor_layout.size != 24 || executor_layout.alignment != 8) fail("Executor ABI mismatch");
+    if (executor_layout.size != 32 || executor_layout.alignment != 8) fail("Executor ABI mismatch");
+    const auto scope_layout = layouts.layoutOf(Type::simple(TypeKind::TaskScope));
+    if (scope_layout.size != 24 || scope_layout.alignment != 8) fail("TaskScope ABI mismatch");
+    const auto handle_layout = layouts.layoutOf(Type::taskHandle(Type::simple(TypeKind::I32)));
+    if (handle_layout.size != 8 || handle_layout.alignment != 8) fail("TaskHandle<i32> ABI mismatch");
+    const auto option_unit_layout = layouts.layoutOf(Type::option(Type::simple(TypeKind::Unit)));
+    if (option_unit_layout.size != 1 || option_unit_layout.alignment != 1) fail("Option<unit> ABI mismatch");
     const auto future_i32_layout = layouts.layoutOf(Type::future(Type::simple(TypeKind::I32)));
     if (future_i32_layout.size != 32 || future_i32_layout.alignment != 8) fail("Future<i32> ABI mismatch");
     const auto future_unit_layout = layouts.layoutOf(Type::future(Type::simple(TypeKind::Unit)));
